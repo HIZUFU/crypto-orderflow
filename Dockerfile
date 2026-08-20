@@ -7,6 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY app ./app
+COPY static ./static
 RUN pip install --no-cache-dir . asyncpg==0.30.0
 
 RUN useradd --create-home --uid 10001 appuser \
