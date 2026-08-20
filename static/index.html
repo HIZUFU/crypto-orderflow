@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crypto Orderflow</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <span class="eyebrow">ORDERFLOW LAB</span>
+      <h1>Market monitor</h1>
+    </div>
+    <div id="mode" class="mode">PAPER ONLY</div>
+  </header>
+  <main>
+    <section class="status-grid" id="status"></section>
+    <section class="layout">
+      <article class="panel wide">
+        <div class="panel-header"><h2>Market state</h2><span id="updated">waiting for stream</span></div>
+        <div id="market" class="market-grid"></div>
+      </article>
+      <article class="panel">
+        <div class="panel-header"><h2>Open paper trades</h2></div>
+        <div id="trades" class="table-wrap"></div>
+      </article>
+      <article class="panel wide">
+        <div class="panel-header"><h2>Alerts</h2><button class="icon-button" title="Refresh" onclick="refresh()">Refresh</button></div>
+        <div id="alerts" class="table-wrap"></div>
+      </article>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

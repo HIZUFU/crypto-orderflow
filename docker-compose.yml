@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:16.6
+    environment:
+      POSTGRES_DB: orderflow
+      POSTGRES_USER: orderflow
+      POSTGRES_PASSWORD: change-this-local-password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  app:
+    build: .
+    depends_on:
+      - db
+    environment:
+      APP_ENV: production
+      APP_HOST: 0.0.0.0
+      DATABASE_URL: postgresql+asyncpg://orderflow:change-this-local-password@db:5432/orderflow
+      BYBIT_WS_URL: wss://stream.bybit.com/v5/public/linear
+      SYMBOLS: BTCUSDT,ETHUSDT
+      ORDERBOOK_DEPTH: 50
+      TRADING_MODE: paper
+      LIVE_TRADING_ENABLED: "false"
+      PAPER_NOTIONAL_USDT: 10
+      PAPER_LEVERAGE: 1
+      PAPER_FEE_RATE: 0.00055
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - app_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  app_data:
