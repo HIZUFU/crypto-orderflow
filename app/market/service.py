@@ -33,7 +33,9 @@ class MarketService:
     async def stop(self) -> None:
         self._stop.set()
         if self._task:
-            await self._task
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+            self._task = None
 
     async def run(self) -> None:
         while not self._stop.is_set():
@@ -43,7 +45,10 @@ class MarketService:
                 raise
             except Exception:
                 logger.exception("market stream failed; reconnecting")
-                await asyncio.sleep(self.settings.reconnect_delay_seconds)
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=self.settings.reconnect_delay_seconds)
+                except asyncio.TimeoutError:
+                    pass
 
     async def _stream_once(self) -> None:
         args = []
