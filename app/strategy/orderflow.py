@@ -18,6 +18,7 @@ class Signal:
 
 def generate_signal(symbol: str, features: dict[str, float], notional: float = 10.0, leverage: int = 1) -> Signal | None:
     """Transparent research rule; thresholds must be validated out of sample."""
+    del leverage  # Leverage changes margin, not the price risk of a fixed notional.
     imbalance = features["imbalance"]
     delta = features["delta_ratio_3s"]
     spread = features["spread_bps"]
@@ -55,7 +56,7 @@ def generate_signal(symbol: str, features: dict[str, float], notional: float = 1
         reference_price=mid,
         stop_loss=stop,
         take_profit=target,
-        risk_amount=notional * risk_pct / max(leverage, 1),
+        risk_amount=notional * risk_pct,
         score=score,
         reason=f"imbalance={imbalance:.3f}, delta_3s={delta:.3f}, microprice_offset={offset:.2f}bps",
         features=features,
