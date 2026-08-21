@@ -17,7 +17,10 @@
       <a href="/chart.html" class="nav-link">Charts</a>
       <a href="/pnl.html" class="nav-link">PnL</a>
     </nav>
-    <div id="mode" class="mode">PAPER ONLY</div>
+    <div class="topbar-right">
+      <div id="exchange-badge" class="exchange-badge"></div>
+      <div id="mode" class="mode">PAPER ONLY</div>
+    </div>
   </header>
   <main>
     <section class="status-grid" id="status"></section>
@@ -31,7 +34,10 @@
         <div id="trades" class="table-wrap"></div>
       </article>
       <article class="panel wide">
-        <div class="panel-header"><h2>Alerts</h2><button class="icon-button" title="Refresh" onclick="refresh()">Refresh</button></div>
+        <div class="panel-header">
+          <h2>Alerts</h2>
+          <button class="icon-button" title="Refresh" onclick="refresh()">Refresh</button>
+        </div>
         <div id="alerts" class="table-wrap"></div>
       </article>
     </section>
