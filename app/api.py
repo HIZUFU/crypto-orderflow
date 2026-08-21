@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db.models import Alert, Balance, PaperTrade, Watchlist, utc_now
 from app.db.session import get_session
+from app.exchanges import EXCHANGES
 
 router = APIRouter(prefix="/api")
 settings = get_settings()
@@ -77,9 +78,19 @@ async def health(request: Request) -> dict:
         "status": "ok",
         "mode": settings.trading_mode,
         "live_trading_enabled": settings.live_trading_enabled,
+        "exchange": service.exchange.name,
         "symbols": settings.tracked_symbols,
         "stream_connected": bool(service._task and not service._task.done()),
         "books_ready": {symbol: book.ready for symbol, book in service.books.items()},
+    }
+
+
+@router.get("/exchanges")
+async def list_exchanges() -> dict:
+    """List available exchanges."""
+    return {
+        "current": settings.default_exchange,
+        "available": list(EXCHANGES.keys()),
     }
 
 
@@ -110,6 +121,7 @@ async def get_candles(
         return {
             "symbol": symbol,
             "timeframe": timeframe,
+            "exchange": service.exchange.name,
             "candles": candles,
         }
     except ValueError as e:
