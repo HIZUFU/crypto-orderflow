@@ -14,7 +14,6 @@ if settings.database_url.startswith("sqlite"):
 engine = create_async_engine(settings.database_url, echo=False, pool_pre_ping=True)
 session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-
 _ALERT_COLUMNS = {
     "exchange": "VARCHAR(16) DEFAULT 'bybit'",
     "chart_snapshot": "TEXT",
@@ -25,13 +24,15 @@ _ALERT_COLUMNS = {
 
 
 def _migrate_existing_schema(connection) -> None:
-    """Create tables and add columns introduced after the first local release."""
     Base.metadata.create_all(connection)
     inspector = inspect(connection)
-    alert_columns = {column["name"] for column in inspector.get_columns("alerts")}
+    columns = {column["name"] for column in inspector.get_columns("alerts")}
     for name, definition in _ALERT_COLUMNS.items():
-        if name not in alert_columns:
+        if name not in columns:
             connection.execute(text(f"ALTER TABLE alerts ADD COLUMN {name} {definition}"))
+    connection.execute(text("UPDATE alerts SET exchange = 'bybit' WHERE exchange IS NULL"))
+    connection.execute(text("UPDATE alerts SET outcome_type = 'pending' WHERE outcome_type IS NULL"))
+    connection.execute(text("UPDATE alerts SET ml_passed_filter = 0 WHERE ml_passed_filter IS NULL"))
 
 
 async def init_db() -> None:

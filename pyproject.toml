@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crypto-orderflow"
-version = "0.1.0"
-description = "Paper-only crypto order-flow analytics and alerting platform"
+version = "1.0.0"
+description = "Paper-only crypto order-flow analytics, alert journal and CatBoost research platform"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "aiosqlite==0.20.0",
@@ -29,6 +29,7 @@ ml = [
   "catboost==1.2.7",
   "pandas==2.2.3",
   "pyarrow==18.1.0",
+  "scikit-learn==1.6.1",
 ]
 
 [tool.setuptools.packages.find]
