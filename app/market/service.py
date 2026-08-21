@@ -5,10 +5,11 @@ from datetime import timedelta
 from time import monotonic
 
 import websockets
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config import Settings
-from app.db.models import Alert, utc_now
+from app.db.models import Alert, PaperTrade, utc_now
 from app.market.features import FeatureEngine, TradeEvent
 from app.market.orderbook import LocalOrderBook
 from app.strategy.orderflow import generate_signal
@@ -25,17 +26,27 @@ class MarketService:
         self.latest: dict[str, dict[str, float]] = {}
         self.last_signal_at: dict[str, float] = {}
         self._task: asyncio.Task | None = None
+        self._monitor_task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self.run(), name="market-data")
+        if self.settings.enable_auto_close:
+            self._monitor_task = asyncio.create_task(self._monitor_positions(), name="position-monitor")
 
     async def stop(self) -> None:
         self._stop.set()
+        tasks = []
         if self._task:
             self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-            self._task = None
+            tasks.append(self._task)
+        if self._monitor_task:
+            self._monitor_task.cancel()
+            tasks.append(self._monitor_task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._task = None
+        self._monitor_task = None
 
     async def run(self) -> None:
         while not self._stop.is_set():
@@ -124,3 +135,84 @@ class MarketService:
             )
             await session.commit()
         logger.info("paper alert %s %s score=%.3f", symbol, signal.direction, signal.score)
+
+    async def _monitor_positions(self) -> None:
+        """Monitor open paper trades and close them if stop/target is hit."""
+        while not self._stop.is_set():
+            try:
+                await self._check_positions()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("position monitor error")
+            
+            try:
+                await asyncio.wait_for(
+                    self._stop.wait(),
+                    timeout=self.settings.position_monitor_interval_seconds
+                )
+            except asyncio.TimeoutError:
+                pass
+
+    async def _check_positions(self) -> None:
+        """Check open positions against current prices and close if needed."""
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(PaperTrade).where(PaperTrade.status == "open")
+            )
+            open_trades = list(result.scalars())
+            
+            if not open_trades:
+                return
+            
+            for trade in open_trades:
+                # Get current mid price from features
+                features = self.latest.get(trade.symbol)
+                if features is None:
+                    continue
+                
+                current_price = features.get("mid_price")
+                if current_price is None:
+                    continue
+                
+                should_close = False
+                exit_reason = None
+                
+                if trade.direction == "LONG":
+                    if current_price <= trade.stop_loss:
+                        should_close = True
+                        exit_reason = "stop_loss"
+                    elif current_price >= trade.take_profit:
+                        should_close = True
+                        exit_reason = "take_profit"
+                elif trade.direction == "SHORT":
+                    if current_price >= trade.stop_loss:
+                        should_close = True
+                        exit_reason = "stop_loss"
+                    elif current_price <= trade.take_profit:
+                        should_close = True
+                        exit_reason = "take_profit"
+                
+                if should_close:
+                    # Calculate PnL
+                    gross = ((current_price - trade.entry_price) / trade.entry_price) * trade.notional
+                    if trade.direction == "SHORT":
+                        gross *= -1
+                    
+                    trade.fees = trade.notional * self.settings.paper_fee_rate * 2
+                    trade.pnl = gross - trade.fees
+                    trade.exit_price = current_price
+                    trade.exit_reason = exit_reason
+                    trade.closed_at = utc_now()
+                    trade.status = "closed"
+                    
+                    logger.info(
+                        "auto-closed %s %s at %.2f (%s), pnl=%.4f USDT",
+                        trade.symbol,
+                        trade.direction,
+                        current_price,
+                        exit_reason,
+                        trade.pnl,
+                    )
+            
+            await session.commit()
