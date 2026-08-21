@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import desc, func, select
@@ -74,6 +75,15 @@ def trade_json(trade: PaperTrade, current_price: float | None = None) -> dict:
 @router.get("/health")
 async def health(request: Request) -> dict:
     service = request.app.state.market_service
+    
+    # Check if ML filter is loaded
+    ml_status = "disabled"
+    if settings.use_ml_filter:
+        if service.ml_filter and service.ml_filter.model:
+            ml_status = "enabled"
+        else:
+            ml_status = "enabled_but_no_model"
+    
     return {
         "status": "ok",
         "mode": settings.trading_mode,
@@ -82,6 +92,13 @@ async def health(request: Request) -> dict:
         "symbols": settings.tracked_symbols,
         "stream_connected": bool(service._task and not service._task.done()),
         "books_ready": {symbol: book.ready for symbol, book in service.books.items()},
+        "ml_filter": {
+            "enabled": settings.use_ml_filter,
+            "status": ml_status,
+            "model_path": str(settings.ml_model_path),
+            "model_exists": Path(settings.ml_model_path).exists(),
+            "threshold": settings.ml_threshold,
+        },
     }
 
 
@@ -97,6 +114,35 @@ async def list_exchanges() -> dict:
 @router.get("/market")
 async def market(request: Request) -> dict:
     return request.app.state.market_service.latest
+
+
+@router.get("/orderbook/{symbol}")
+async def get_orderbook(symbol: str, levels: int = 20, request: Request = None) -> dict:
+    """Get current order book for a symbol."""
+    if request is None:
+        raise HTTPException(status_code=500, detail="Request context not available")
+    
+    service = request.app.state.market_service
+    symbol = symbol.upper()
+    
+    if symbol not in service.books:
+        raise HTTPException(status_code=404, detail=f"Symbol {symbol} not found")
+    
+    book = service.books[symbol]
+    if not book.ready:
+        raise HTTPException(status_code=503, detail=f"Order book for {symbol} not ready yet")
+    
+    # Get top N levels
+    bids = list(book.bids.items())[:levels]
+    asks = list(book.asks.items())[:levels]
+    
+    return {
+        "symbol": symbol,
+        "exchange": service.exchange.name,
+        "timestamp": book.last_update_time,
+        "bids": [{"price": float(price), "size": float(size)} for price, size in bids],
+        "asks": [{"price": float(price), "size": float(size)} for price, size in asks],
+    }
 
 
 @router.get("/candles/{symbol}")
