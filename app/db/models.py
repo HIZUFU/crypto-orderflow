@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, Boolean
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -34,6 +34,13 @@ class Alert(Base):
     reason: Mapped[str] = mapped_column(Text)
     strategy_version: Mapped[str] = mapped_column(String(32), default="ofm-v0.1")
     features_json: Mapped[str] = mapped_column(Text, default="{}")
+    exchange: Mapped[str] = mapped_column(String(16), default="bybit")
+    chart_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    
+    # ML fields
+    ml_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ml_passed_filter: Mapped[bool] = mapped_column(Boolean, default=False)
+    outcome_type: Mapped[str] = mapped_column(String(24), default="pending")  # 'pending', 'opened', 'expired', 'skipped'
 
 
 class PaperTrade(Base):
@@ -55,3 +62,59 @@ class PaperTrade(Base):
     fees: Mapped[float] = mapped_column(Float, default=0.0)
     pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class AlertOutcome(Base):
+    """Track what happened to each alert - opened, expired, skipped, etc."""
+    __tablename__ = "alert_outcomes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    alert_id: Mapped[int] = mapped_column(ForeignKey("alerts.id"), index=True)
+    
+    # Outcome details
+    outcome_type: Mapped[str] = mapped_column(String(24), index=True)  # 'paper_opened', 'expired', 'manual_skip', 'missed'
+    outcome_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    
+    # If paper trade was opened
+    paper_trade_id: Mapped[int | None] = mapped_column(ForeignKey("paper_trades.id"), nullable=True)
+    
+    # Metrics
+    time_to_action_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_at_outcome: Mapped[float | None] = mapped_column(Float, nullable=True)
+    
+    # Hypothetical analysis (for missed/expired alerts)
+    hypothetical_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reached_target: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    hit_stop: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    
+    # ML specific
+    ml_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ml_passed_filter: Mapped[bool] = mapped_column(Boolean, default=False)
+    
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class Balance(Base):
+    """Track paper and real balance over time for equity curve."""
+    __tablename__ = "balances"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    paper_balance: Mapped[float] = mapped_column(Float, default=10000.0)
+    real_balance: Mapped[float] = mapped_column(Float, default=0.0)
+    paper_equity: Mapped[float] = mapped_column(Float, default=10000.0)
+    real_equity: Mapped[float] = mapped_column(Float, default=0.0)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class Watchlist(Base):
+    """User-managed list of symbols to track."""
+    __tablename__ = "watchlist"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    exchange: Mapped[str] = mapped_column(String(16), default="bybit", index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    notes: Mapped[str | None] = mapped_column(String(255), nullable=True)
