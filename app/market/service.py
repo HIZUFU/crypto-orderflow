@@ -13,6 +13,7 @@ from app.exchanges import get_exchange
 from app.market.candles import CandleAggregator
 from app.market.features import FeatureEngine, TradeEvent
 from app.market.orderbook import LocalOrderBook
+from app.ml.filter import SignalFilter
 from app.strategy.orderflow import generate_signal
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,20 @@ class MarketService:
         self.candles = {symbol: CandleAggregator(symbol) for symbol in settings.tracked_symbols}
         self.latest: dict[str, dict[str, float]] = {}
         self.last_signal_at: dict[str, float] = {}
+        
+        # Initialize ML filter if enabled
+        self.ml_filter: SignalFilter | None = None
+        if settings.use_ml_filter:
+            try:
+                self.ml_filter = SignalFilter(model_path=settings.ml_model_path)
+                if self.ml_filter.model is not None:
+                    logger.info(f"ML filter loaded from {settings.ml_model_path}")
+                else:
+                    logger.warning("ML filter enabled but model not found, falling back to rule-based only")
+            except Exception as e:
+                logger.error(f"Failed to load ML filter: {e}")
+                self.ml_filter = None
+        
         self._task: asyncio.Task | None = None
         self._monitor_task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -124,9 +139,28 @@ class MarketService:
         now = monotonic()
         if now - self.last_signal_at.get(symbol, 0.0) < self.settings.signal_cooldown_seconds:
             return
+        
         signal = generate_signal(symbol, features, self.settings.paper_notional_usdt, self.settings.paper_leverage)
         if signal is None:
             return
+        
+        # Apply ML filter if enabled
+        if self.ml_filter is not None and self.ml_filter.model is not None:
+            ml_proba = self.ml_filter.predict_proba(features, signal.score)
+            passed_filter = ml_proba >= self.settings.ml_threshold
+            
+            if not passed_filter:
+                logger.debug(
+                    f"ML filter rejected: {symbol} {signal.direction} "
+                    f"(rule_score={signal.score:.3f}, ml_proba={ml_proba:.3f}, threshold={self.settings.ml_threshold})"
+                )
+                return
+            
+            logger.info(
+                f"ML filter passed: {symbol} {signal.direction} "
+                f"(rule_score={signal.score:.3f}, ml_proba={ml_proba:.3f})"
+            )
+        
         self.last_signal_at[symbol] = now
         created = utc_now()
         async with self.session_factory() as session:
