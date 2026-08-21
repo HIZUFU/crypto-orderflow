@@ -36,8 +36,8 @@ def alert_json(alert: Alert) -> dict:
     }
 
 
-def trade_json(trade: PaperTrade) -> dict:
-    return {
+def trade_json(trade: PaperTrade, current_price: float | None = None) -> dict:
+    result = {
         "id": trade.id,
         "alert_id": trade.alert_id,
         "symbol": trade.symbol,
@@ -55,6 +55,18 @@ def trade_json(trade: PaperTrade) -> dict:
         "pnl": trade.pnl,
         "exit_reason": trade.exit_reason,
     }
+    
+    # Calculate unrealized PnL for open trades
+    if trade.status == "open" and current_price is not None:
+        gross = ((current_price - trade.entry_price) / trade.entry_price) * trade.notional
+        if trade.direction == "SHORT":
+            gross *= -1
+        fees = trade.notional * settings.paper_fee_rate * 2
+        unrealized_pnl = gross - fees
+        result["current_price"] = current_price
+        result["unrealized_pnl"] = unrealized_pnl
+    
+    return result
 
 
 @router.get("/health")
@@ -111,10 +123,23 @@ async def open_paper_trade(alert_id: int, session: AsyncSession = Depends(get_se
 
 
 @router.get("/paper-trades")
-async def paper_trades(limit: int = 50, session: AsyncSession = Depends(get_session)) -> list[dict]:
+async def paper_trades(
+    limit: int = 50,
+    request: Request | None = None,
+    session: AsyncSession = Depends(get_session)
+) -> list[dict]:
     limit = min(max(limit, 1), 200)
     result = await session.execute(select(PaperTrade).order_by(desc(PaperTrade.opened_at)).limit(limit))
-    return [trade_json(trade) for trade in result.scalars()]
+    trades = list(result.scalars())
+    
+    # Get current prices for unrealized PnL calculation
+    current_prices = {}
+    if request:
+        service = request.app.state.market_service
+        for symbol, features in service.latest.items():
+            current_prices[symbol] = features.get("mid_price")
+    
+    return [trade_json(trade, current_prices.get(trade.symbol)) for trade in trades]
 
 
 @router.post("/paper-trades/{trade_id}/close")
