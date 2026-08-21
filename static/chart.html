@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Charts - Crypto Orderflow</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <span class="eyebrow">ORDERFLOW LAB</span>
+      <h1>Chart view</h1>
+    </div>
+    <nav class="nav">
+      <a href="/" class="nav-link">Dashboard</a>
+      <a href="/chart.html" class="nav-link active">Charts</a>
+      <a href="/pnl.html" class="nav-link">PnL</a>
+    </nav>
+    <div id="mode" class="mode">PAPER ONLY</div>
+  </header>
+  <main>
+    <section class="chart-controls">
+      <div class="control-group">
+        <label for="symbol-select">Symbol:</label>
+        <select id="symbol-select" class="select">
+          <option value="BTCUSDT">BTCUSDT</option>
+          <option value="ETHUSDT">ETHUSDT</option>
+        </select>
+      </div>
+      <div class="control-group">
+        <label for="timeframe-select">Timeframe:</label>
+        <select id="timeframe-select" class="select">
+          <option value="1m" selected>1 minute</option>
+          <option value="5m">5 minutes</option>
+          <option value="15m">15 minutes</option>
+          <option value="1h">1 hour</option>
+        </select>
+      </div>
+      <div class="control-group">
+        <label>
+          <input type="checkbox" id="show-alerts" checked> Show alerts
+        </label>
+      </div>
+    </section>
+    
+    <section class="chart-container">
+      <div id="chart"></div>
+    </section>
+    
+    <section class="chart-info">
+      <div class="panel">
+        <div class="panel-header"><h2>Recent Alerts on Chart</h2></div>
+        <div id="chart-alerts" class="table-wrap"></div>
+      </div>
+    </section>
+  </main>
+  
+  <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="/chart.js"></script>
+</body>
+</html>

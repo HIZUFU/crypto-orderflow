@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PnL Analytics - Crypto Orderflow</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <span class="eyebrow">ORDERFLOW LAB</span>
+      <h1>PnL Analytics</h1>
+    </div>
+    <nav class="nav">
+      <a href="/" class="nav-link">Dashboard</a>
+      <a href="/chart.html" class="nav-link">Charts</a>
+      <a href="/pnl.html" class="nav-link active">PnL</a>
+    </nav>
+    <div id="mode" class="mode">PAPER ONLY</div>
+  </header>
+  <main>
+    <section class="stats-grid" id="stats-grid"></section>
+    
+    <section class="pnl-chart-section">
+      <div class="panel">
+        <div class="panel-header"><h2>Equity Curve</h2></div>
+        <canvas id="equity-chart" height="300"></canvas>
+      </div>
+    </section>
+    
+    <section class="trades-history">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Closed Trades History</h2>
+          <div class="filter-controls">
+            <label>
+              <input type="radio" name="filter" value="all" checked> All
+            </label>
+            <label>
+              <input type="radio" name="filter" value="wins"> Wins
+            </label>
+            <label>
+              <input type="radio" name="filter" value="losses"> Losses
+            </label>
+          </div>
+        </div>
+        <div id="closed-trades" class="table-wrap"></div>
+      </div>
+    </section>
+  </main>
+  
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="/pnl.js"></script>
+</body>
+</html>

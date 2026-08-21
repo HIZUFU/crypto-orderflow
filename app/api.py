@@ -88,6 +88,34 @@ async def market(request: Request) -> dict:
     return request.app.state.market_service.latest
 
 
+@router.get("/candles/{symbol}")
+async def get_candles(
+    symbol: str,
+    timeframe: str = "1m",
+    limit: int = 100,
+    request: Request = None
+) -> dict:
+    """Get OHLCV candles for a symbol."""
+    if request is None:
+        raise HTTPException(status_code=500, detail="Request context not available")
+    
+    service = request.app.state.market_service
+    symbol = symbol.upper()
+    
+    if symbol not in service.candles:
+        raise HTTPException(status_code=404, detail=f"Symbol {symbol} not found")
+    
+    try:
+        candles = service.candles[symbol].get_candles(timeframe, limit)
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "candles": candles,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/alerts")
 async def alerts(limit: int = 50, session: AsyncSession = Depends(get_session)) -> list[dict]:
     limit = min(max(limit, 1), 200)

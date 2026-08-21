@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config import Settings
 from app.db.models import Alert, PaperTrade, utc_now
+from app.market.candles import CandleAggregator
 from app.market.features import FeatureEngine, TradeEvent
 from app.market.orderbook import LocalOrderBook
 from app.strategy.orderflow import generate_signal
@@ -23,6 +24,7 @@ class MarketService:
         self.session_factory = session_factory
         self.books = {symbol: LocalOrderBook() for symbol in settings.tracked_symbols}
         self.engines = {symbol: FeatureEngine(self.books[symbol]) for symbol in settings.tracked_symbols}
+        self.candles = {symbol: CandleAggregator(symbol) for symbol in settings.tracked_symbols}
         self.latest: dict[str, dict[str, float]] = {}
         self.last_signal_at: dict[str, float] = {}
         self._task: asyncio.Task | None = None
@@ -95,14 +97,21 @@ class MarketService:
             for trade in message.get("data", []):
                 symbol = trade.get("s")
                 if symbol in self.engines:
-                    self.engines[symbol].observe_trade(
-                        TradeEvent(
-                            timestamp_ms=int(trade["T"]),
-                            price=float(trade["p"]),
-                            quantity=float(trade["v"]),
-                            side=trade["S"],
-                        )
+                    trade_event = TradeEvent(
+                        timestamp_ms=int(trade["T"]),
+                        price=float(trade["p"]),
+                        quantity=float(trade["v"]),
+                        side=trade["S"],
                     )
+                    self.engines[symbol].observe_trade(trade_event)
+                    
+                    # Also feed to candle aggregator
+                    if symbol in self.candles:
+                        self.candles[symbol].add_trade(
+                            timestamp_ms=trade_event.timestamp_ms,
+                            price=trade_event.price,
+                            volume=trade_event.quantity,
+                        )
 
     async def _maybe_alert(self, symbol: str, features: dict[str, float]) -> None:
         now = monotonic()
