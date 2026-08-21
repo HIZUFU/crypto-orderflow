@@ -4,7 +4,7 @@ import logging
 from datetime import timedelta
 from time import monotonic
 
-from sqlalchemy import desc, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config import Settings
@@ -81,13 +81,7 @@ class MarketService:
                 symbol = update.symbol.upper()
                 if symbol not in self.books:
                     continue
-                self.books[symbol].apply(
-                    "snapshot" if update.is_snapshot else "delta",
-                    update.bids,
-                    update.asks,
-                    update.update_id,
-                    update.timestamp_ms,
-                )
+                self.books[symbol].apply("snapshot" if update.is_snapshot else "delta", update.bids, update.asks, update.update_id, update.timestamp_ms)
                 features = self.engines[symbol].calculate()
                 if features is not None:
                     self.latest[symbol] = features
@@ -104,14 +98,7 @@ class MarketService:
         now = monotonic()
         if now - self.last_signal_at.get(symbol, 0.0) < self.settings.signal_cooldown_seconds:
             return
-        signal = generate_signal(
-            symbol,
-            features,
-            self.settings.paper_notional_usdt,
-            self.settings.paper_leverage,
-            self.settings.risk_value,
-            self.settings.reward_risk_ratio,
-        )
+        signal = generate_signal(symbol, features, self.settings.paper_notional_usdt, self.settings.paper_leverage, self.settings.risk_value, self.settings.reward_risk_ratio)
         if signal is None:
             return
         ml_probability = None
@@ -125,26 +112,7 @@ class MarketService:
         self.last_signal_at[symbol] = now
         created = utc_now()
         async with self.session_factory() as session:
-            session.add(Alert(
-                created_at=created,
-                expires_at=created + timedelta(seconds=self.settings.signal_ttl_seconds),
-                symbol=signal.symbol,
-                direction=signal.direction,
-                entry_low=signal.entry_low,
-                entry_high=signal.entry_high,
-                reference_price=signal.reference_price,
-                stop_loss=signal.stop_loss,
-                take_profit=signal.take_profit,
-                position_notional=self.settings.paper_notional_usdt,
-                leverage=self.settings.paper_leverage,
-                risk_amount=signal.risk_amount,
-                score=signal.score,
-                reason=signal.reason,
-                features_json=json.dumps(signal.features),
-                exchange=self.exchange.name,
-                ml_probability=ml_probability,
-                ml_passed_filter=ml_passed,
-            ))
+            session.add(Alert(created_at=created, expires_at=created + timedelta(seconds=self.settings.signal_ttl_seconds), symbol=signal.symbol, direction=signal.direction, entry_low=signal.entry_low, entry_high=signal.entry_high, reference_price=signal.reference_price, stop_loss=signal.stop_loss, take_profit=signal.take_profit, position_notional=self.settings.paper_notional_usdt, leverage=self.settings.paper_leverage, risk_amount=signal.risk_amount, score=signal.score, reason=signal.reason, features_json=json.dumps(signal.features), exchange=self.exchange.name, ml_probability=ml_probability, ml_passed_filter=ml_passed))
             await session.commit()
         logger.info("alert %s %s %s score=%.3f", self.exchange.name, symbol, signal.direction, signal.score)
 
@@ -185,12 +153,10 @@ class MarketService:
                     trade.exit_reason = reason
                     trade.closed_at = utc_now()
                     trade.status = "closed"
-                    outcome_result = await session.execute(select(AlertOutcome).where(AlertOutcome.paper_trade_id == trade.id).order_by(desc(AlertOutcome.created_at)))
-                    outcome = outcome_result.scalars().first()
-                    if outcome:
-                        outcome.outcome_type = reason
-                        outcome.outcome_timestamp = trade.closed_at
-                        outcome.price_at_outcome = current
+                    alert = await session.get(Alert, trade.alert_id)
+                    if alert:
+                        alert.outcome_type = reason
+                        session.add(AlertOutcome(alert_id=alert.id, paper_trade_id=trade.id, outcome_type=reason, outcome_timestamp=trade.closed_at, price_at_outcome=current, ml_probability=alert.ml_probability, ml_passed_filter=alert.ml_passed_filter))
                     logger.info("auto-closed trade %s: %s pnl=%.4f", trade.id, reason, trade.pnl)
             await session.commit()
 
@@ -223,15 +189,5 @@ class MarketService:
                         hypothetical *= -1
                     reached_target = current >= alert.take_profit if alert.direction == "LONG" else current <= alert.take_profit
                     hit_stop = current <= alert.stop_loss if alert.direction == "LONG" else current >= alert.stop_loss
-                session.add(AlertOutcome(
-                    alert_id=alert.id,
-                    outcome_type="expired",
-                    outcome_timestamp=now,
-                    price_at_outcome=current,
-                    hypothetical_pnl=hypothetical,
-                    reached_target=reached_target,
-                    hit_stop=hit_stop,
-                    ml_probability=alert.ml_probability,
-                    ml_passed_filter=alert.ml_passed_filter,
-                ))
+                session.add(AlertOutcome(alert_id=alert.id, outcome_type="expired", outcome_timestamp=now, price_at_outcome=current, hypothetical_pnl=hypothetical, reached_target=reached_target, hit_stop=hit_stop, ml_probability=alert.ml_probability, ml_passed_filter=alert.ml_passed_filter))
             await session.commit()
