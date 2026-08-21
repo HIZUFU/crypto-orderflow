@@ -1,150 +1,58 @@
 const $ = (id) => document.getElementById(id);
-const fmt = (value, digits = 4) => value == null ? "-" : Number(value).toFixed(digits);
+const fmt = (value, digits = 2) => value == null || Number.isNaN(Number(value)) ? "-" : Number(value).toFixed(digits);
+const pct = (value, digits = 1) => `${(Number(value || 0) * 100).toFixed(digits)}%`;
 const esc = (value) => String(value ?? "").replace(/[&<>\"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));
+let lastAlertIds = new Set();
 
-async function get(path, options = {}) {
+async function api(path, options = {}) {
   const response = await fetch(path, options);
-  if (!response.ok) throw new Error(await response.text());
-  return response.json();
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.detail || "Request failed");
+  return body;
 }
-
-function renderStatus(health, alerts, trades) {
-  const open = trades.filter((trade) => trade.status === "open").length;
-  $("status").innerHTML = [
-    ["stream", health.stream_connected ? "connected" : "offline"],
-    ["books ready", Object.values(health.books_ready).filter(Boolean).length + "/" + health.symbols.length],
-    ["alerts", alerts.length],
-    ["open paper", open],
-  ].map(([label, value]) => `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value">${esc(value)}</div></div>`).join("");
-  
-  // Update exchange badge
-  if ($("exchange-badge")) {
-    $("exchange-badge").textContent = health.exchange?.toUpperCase() || "BYBIT";
-  }
+function toast(message, kind = "info") { const node = $("toast"); node.textContent = message; node.className = `toast visible ${kind}`; window.clearTimeout(window.toastTimer); window.toastTimer = window.setTimeout(() => node.className = "toast", 3500); }
+function sideClass(direction) { return direction === "LONG" ? "long" : "short"; }
+function renderSummary(health, stats, analytics) {
+  $("summary").innerHTML = [
+    ["Stream", health.stream_connected ? "Connected" : "Offline", health.stream_connected ? "positive" : "negative", "public WebSocket"],
+    ["Books ready", `${Object.values(health.books_ready).filter(Boolean).length}/${health.symbols.length}`, "", "order book snapshots"],
+    ["Issued alerts", analytics.total_alerts, "", `${pct(analytics.conversion_rate)} opened`],
+    ["Paper equity", `${fmt(stats.equity, 2)} USDT`, stats.equity >= stats.initial_balance ? "positive" : "negative", `realized ${fmt(stats.realized_pnl, 2)} USDT`],
+    ["Win rate", pct(stats.win_rate), stats.win_rate >= 0.5 ? "positive" : "negative", `${stats.closed_trades} closed trades`],
+    ["Max drawdown", `${fmt(stats.max_drawdown, 2)} USDT`, stats.max_drawdown < 0 ? "negative" : "positive", "closed-trade equity"],
+  ].map(([label, value, cls, hint]) => `<div class="metric-card"><span>${label}</span><strong class="${cls}">${value}</strong><small>${hint}</small></div>`).join("");
 }
-
-function renderMarket(market) {
-  const symbols = Object.keys(market);
-  $("market").innerHTML = symbols.length ? symbols.map((symbol) => {
-    const item = market[symbol];
-    const imbalanceClass = item.imbalance >= 0 ? "positive" : "negative";
-    return `<div class="market-card"><div class="market-title"><span>${esc(symbol)}</span><span class="${imbalanceClass}">${item.imbalance >= 0 ? "LONG BIAS" : "SHORT BIAS"}</span></div><div class="metrics">
-      <div><div class="metric-label">mid</div><div class="metric-value">${fmt(item.mid_price, 2)}</div></div>
-      <div><div class="metric-label">spread</div><div class="metric-value">${fmt(item.spread_bps, 2)} bps</div></div>
-      <div><div class="metric-label">imbalance</div><div class="metric-value ${imbalanceClass}">${fmt(item.imbalance, 3)}</div></div>
-      <div><div class="metric-label">delta / 3s</div><div class="metric-value ${item.delta_ratio_3s >= 0 ? "positive" : "negative"}">${fmt(item.delta_ratio_3s, 3)}</div></div>
-      <div><div class="metric-label">microprice offset</div><div class="metric-value">${fmt(item.microprice_offset_bps, 2)} bps</div></div>
-      <div><div class="metric-label">trades / 3s</div><div class="metric-value">${fmt(item.trades_3s, 0)}</div></div>
-    </div></div>`;
-  }).join("") : '<div class="empty">Waiting for market data...</div>';
+function renderMarket(payload) {
+  const market = payload.symbols || payload;
+  const values = Object.entries(market);
+  $("market").innerHTML = values.length ? values.map(([symbol, item]) => {
+    const pressure = item.imbalance >= 0 ? "LONG" : "SHORT";
+    const pressurePct = Math.min(100, Math.abs(item.imbalance) * 100);
+    return `<article class="market-card"><div class="market-card-head"><div><b>${esc(symbol)}</b><span class="market-sub">mid ${fmt(item.mid_price, 2)}</span></div><span class="signal-pill ${sideClass(pressure)}">${pressure} bias</span></div><div class="pressure"><div class="pressure-label"><span>book pressure</span><b>${fmt(item.imbalance, 3)}</b></div><div class="pressure-track"><i class="${sideClass(pressure)}" style="width:${pressurePct}%"></i></div></div><div class="feature-grid"><div><span>Spread</span><b>${fmt(item.spread_bps, 2)} bps</b></div><div><span>Delta / 3s</span><b class="${item.delta_ratio_3s >= 0 ? "positive" : "negative"}">${fmt(item.delta_ratio_3s, 3)}</b></div><div><span>Microprice</span><b>${fmt(item.microprice_offset_bps, 2)} bps</b></div><div><span>Trades / 3s</span><b>${fmt(item.trades_3s, 0)}</b></div></div><a class="card-link" href="/chart.html?symbol=${encodeURIComponent(symbol)}">Inspect ${esc(symbol)} <span>-></span></a></article>`;
+  }).join("") : `<div class="empty">Waiting for the first order book snapshot.</div>`;
 }
-
+function renderAlerts(alerts) {
+  const active = alerts.filter((alert) => !alert.expired && alert.outcome_type === "pending");
+  const shown = alerts.slice(0, 12);
+  $("alerts").innerHTML = shown.length ? shown.map((alert) => {
+    const actionable = !alert.expired && alert.status === "new" && alert.outcome_type === "pending";
+    const outcome = alert.outcome_type !== "pending" ? `<span class="outcome ${alert.outcome_type}">${esc(alert.outcome_type.replaceAll("_", " "))}</span>` : alert.expired ? `<span class="outcome expired">expired</span>` : "";
+    return `<article class="alert-row"><div class="alert-main"><div class="alert-title"><span class="signal-pill ${sideClass(alert.direction)}">${alert.direction}</span><b>${esc(alert.symbol)}</b><span class="score">${pct(alert.score)}</span><time>${new Date(alert.created_at).toLocaleTimeString()}</time></div><p>${esc(alert.reason)}</p><div class="alert-levels"><span>Entry <b>${fmt(alert.reference_price)}</b></span><span>Stop <b>${fmt(alert.stop_loss)}</b></span><span>Target <b>${fmt(alert.take_profit)}</b></span><span>Risk <b>${fmt(alert.risk_amount, 4)} USDT</b></span></div></div><div class="alert-actions">${outcome}<button class="button tiny" onclick="showAlert(${alert.id})">Details</button>${actionable ? `<button class="button tiny primary" onclick="openPaper(${alert.id})">Open paper</button><button class="button tiny ghost" onclick="skipAlert(${alert.id})">Skip</button>` : ""}</div></article>`;
+  }).join("") : `<div class="empty">No signals yet. The strategy waits for aligned book pressure, delta and microprice.</div>`;
+  const fresh = new Set(active.map((alert) => alert.id));
+  if (lastAlertIds.size && [...fresh].some((id) => !lastAlertIds.has(id))) toast("New order-flow alert", "success");
+  lastAlertIds = fresh;
+}
 function renderTrades(trades) {
   const open = trades.filter((trade) => trade.status === "open");
-  $("trades").innerHTML = open.length ? `<table>
-    <thead>
-      <tr>
-        <th>symbol</th>
-        <th>side</th>
-        <th>entry</th>
-        <th>current</th>
-        <th>stop</th>
-        <th>target</th>
-        <th>unrealized PnL</th>
-        <th>action</th>
-      </tr>
-    </thead>
-    <tbody>${open.map((trade) => {
-      const pnlClass = trade.unrealized_pnl != null ? (trade.unrealized_pnl >= 0 ? "positive" : "negative") : "";
-      return `<tr>
-        <td>${esc(trade.symbol)}</td>
-        <td class="${trade.direction === "LONG" ? "positive" : "negative"}">${trade.direction}</td>
-        <td>${fmt(trade.entry_price, 2)}</td>
-        <td>${trade.current_price != null ? fmt(trade.current_price, 2) : "-"}</td>
-        <td>${fmt(trade.stop_loss, 2)}</td>
-        <td>${fmt(trade.take_profit, 2)}</td>
-        <td class="${pnlClass}">${trade.unrealized_pnl != null ? fmt(trade.unrealized_pnl, 4) + " USDT" : "-"}</td>
-        <td><button class="button button-small" onclick="closeTrade(${trade.id}, ${trade.current_price})">close</button></td>
-      </tr>`;
-    }).join("")}</tbody>
-  </table>` : '<div class="empty">No open paper trades</div>';
+  $("trades").innerHTML = open.length ? open.map((trade) => `<div class="position-row"><div><b>${esc(trade.symbol)}</b><span class="market-sub ${sideClass(trade.direction)}">${trade.direction} · ${fmt(trade.entry_price)}</span></div><div class="position-right"><b class="${(trade.unrealized_pnl || 0) >= 0 ? "positive" : "negative"}">${fmt(trade.unrealized_pnl, 4)} USDT</b><span>${fmt(trade.current_price)} mark</span><button class="icon-action" title="Close paper position" onclick="closeTrade(${trade.id}, ${trade.current_price})">Close</button></div></div>`).join("") : `<div class="empty">No open paper positions.</div>`;
 }
-
-function renderAlerts(alerts) {
-  $("alerts").innerHTML = alerts.length ? `<table>
-    <thead>
-      <tr>
-        <th>time</th>
-        <th>symbol</th>
-        <th>side</th>
-        <th>score</th>
-        <th>entry</th>
-        <th>risk</th>
-        <th>reason</th>
-        <th>action</th>
-      </tr>
-    </thead>
-    <tbody>${alerts.map((alert) => {
-      const timeStr = new Date(alert.created_at).toLocaleTimeString();
-      const reasonShort = alert.reason.length > 50 ? alert.reason.substring(0, 47) + "..." : alert.reason;
-      return `<tr>
-        <td>${timeStr}</td>
-        <td>${esc(alert.symbol)}</td>
-        <td class="${alert.direction === "LONG" ? "positive" : "negative"}">${alert.direction}</td>
-        <td>${fmt(alert.score * 100, 1)}%</td>
-        <td>${fmt(alert.reference_price, 2)}</td>
-        <td>${fmt(alert.risk_amount, 4)} USDT</td>
-        <td title="${esc(alert.reason)}">${esc(reasonShort)}</td>
-        <td>${alert.status === "paper_opened" ? '<span class="muted">opened</span>' : `<button class="button" onclick="openPaper(${alert.id})">paper</button>`}</td>
-      </tr>`;
-    }).join("")}</tbody>
-  </table>` : '<div class="empty">No alerts yet</div>';
-}
-
-async function openPaper(id) {
-  try { 
-    await get(`/api/alerts/${id}/paper`, {method:"POST"}); 
-    await refresh(); 
-  }
-  catch (error) { window.alert(error.message); }
-}
-
-async function closeTrade(id, currentPrice) {
-  if (!currentPrice) {
-    window.alert("Current price not available");
-    return;
-  }
-  if (!confirm(`Close trade at ${fmt(currentPrice, 2)}?`)) {
-    return;
-  }
-  try {
-    await get(`/api/paper-trades/${id}/close`, {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({exit_price: currentPrice, reason: "manual"})
-    });
-    await refresh();
-  } catch (error) {
-    window.alert(error.message);
-  }
-}
-
-async function refresh() {
-  try {
-    const [health, market, alerts, trades] = await Promise.all([
-      get("/api/health"), 
-      get("/api/market"), 
-      get("/api/alerts"), 
-      get("/api/paper-trades")
-    ]);
-    renderStatus(health, alerts, trades); 
-    renderMarket(market); 
-    renderAlerts(alerts); 
-    renderTrades(trades);
-    $("updated").textContent = new Date().toLocaleTimeString();
-  } catch (error) { 
-    $("updated").textContent = "API unavailable"; 
-  }
-}
+function renderOutcomeMix(analytics) { const entries = Object.entries(analytics.by_outcome || {}); $("outcome-mix").innerHTML = entries.length ? entries.map(([name, count]) => `<div class="mix-row"><span>${esc(name.replaceAll("_", " "))}</span><b>${count}</b></div>`).join("") : `<div class="empty">Outcomes will appear as alerts expire or are traded.</div>`; }
+async function showAlert(id) { try { const data = await api(`/api/alerts/${id}`); const alert = data.alert; $("alert-detail").innerHTML = `<p class="eyebrow">ALERT #${alert.id} · ${esc(alert.exchange)}</p><h2><span class="signal-pill ${sideClass(alert.direction)}">${alert.direction}</span> ${esc(alert.symbol)}</h2><p class="dialog-reason">${esc(alert.reason)}</p><div class="detail-grid">${[["Rule score", pct(alert.score)], ["ML probability", alert.ml_probability == null ? "Not active" : pct(alert.ml_probability)], ["Entry", fmt(alert.reference_price)], ["Stop", fmt(alert.stop_loss)], ["Target", fmt(alert.take_profit)], ["Risk", `${fmt(alert.risk_amount, 4)} USDT`], ["Outcome", alert.outcome_type.replaceAll("_", " ")], ["Expires", new Date(alert.expires_at).toLocaleString()]].map(([label, value]) => `<div><span>${label}</span><b>${value}</b></div>`).join("")}</div><h3>Evidence at signal time</h3><div class="evidence-grid">${Object.entries(alert.features || {}).map(([key, value]) => `<div><span>${key.replaceAll("_", " ")}</span><b>${fmt(value, Math.abs(Number(value)) < 10 ? 3 : 2)}</b></div>`).join("")}</div>${alert.outcome ? `<h3>Recorded result</h3><div class="result-box"><b>${esc(alert.outcome.outcome_type.replaceAll("_", " "))}</b><span>price ${fmt(alert.outcome.price_at_outcome)} · hypothetical ${fmt(alert.outcome.hypothetical_pnl, 4)} USDT</span></div>` : ""}<h3>Paper trades</h3>${data.trades.length ? data.trades.map((trade) => `<div class="result-box"><b>${trade.status}</b><span>${fmt(trade.pnl ?? trade.unrealized_pnl, 4)} USDT · ${esc(trade.exit_reason || "open")}</span></div>`).join("") : `<div class="empty">No paper trade was created.</div>`}`; $("alert-dialog").showModal(); } catch (error) { toast(error.message, "error"); } }
+function closeDialog() { $("alert-dialog").close(); }
+async function openPaper(id) { try { await api(`/api/alerts/${id}/paper`, { method: "POST" }); toast("Paper position opened", "success"); await refresh(); } catch (error) { toast(error.message, "error"); await refresh(); } }
+async function skipAlert(id) { try { await api(`/api/alerts/${id}/skip`, { method: "POST" }); toast("Alert marked as skipped"); await refresh(); } catch (error) { toast(error.message, "error"); } }
+async function closeTrade(id, price) { if (!price) return toast("Current price is not available", "error"); try { await api(`/api/paper-trades/${id}/close`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ exit_price: price, reason: "manual" }) }); toast("Paper position closed", "success"); await refresh(); } catch (error) { toast(error.message, "error"); } }
+async function refresh() { try { const [health, market, alerts, trades, stats, analytics] = await Promise.all([api("/api/health"), api("/api/market"), api("/api/alerts?limit=50"), api("/api/paper-trades?limit=50"), api("/api/stats/pnl"), api("/api/alerts/analytics")]); $("exchange-badge").textContent = health.exchange.toUpperCase(); $("connection-dot").innerHTML = `<i></i> ${health.stream_connected ? "live" : "offline"}`; $("connection-dot").className = `connection ${health.stream_connected ? "online" : "offline"}`; $("last-update").textContent = new Date().toLocaleTimeString(); renderSummary(health, stats, analytics); renderMarket(market); renderAlerts(alerts); renderTrades(trades); renderOutcomeMix(analytics); } catch (error) { $("connection-dot").className = "connection offline"; $("connection-dot").innerHTML = `<i></i> API unavailable`; toast(error.message, "error"); } }
 refresh();
-setInterval(refresh, 2000);
+setInterval(refresh, 2500);
