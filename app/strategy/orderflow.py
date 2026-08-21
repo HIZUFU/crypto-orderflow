@@ -16,9 +16,16 @@ class Signal:
     features: dict[str, float]
 
 
-def generate_signal(symbol: str, features: dict[str, float], notional: float = 10.0, leverage: int = 1) -> Signal | None:
-    """Transparent research rule; thresholds must be validated out of sample."""
-    del leverage  # Leverage changes margin, not the price risk of a fixed notional.
+def generate_signal(
+    symbol: str,
+    features: dict[str, float],
+    notional: float = 50.0,
+    leverage: int = 1,
+    risk_pct: float = 0.0015,
+    reward_risk_ratio: float = 2.0,
+) -> Signal | None:
+    """Generate a transparent order-flow candidate; this is not a calibrated probability."""
+    del leverage
     imbalance = features["imbalance"]
     delta = features["delta_ratio_3s"]
     spread = features["spread_bps"]
@@ -33,14 +40,16 @@ def generate_signal(symbol: str, features: dict[str, float], notional: float = 1
 
     if imbalance >= 0.22 and delta >= 0.18 and offset > 0:
         direction, score = "LONG", min(long_score, 0.99)
+        evidence = "bid pressure, positive trade delta and bullish microprice"
     elif imbalance <= -0.22 and delta <= -0.18 and offset < 0:
         direction, score = "SHORT", min(short_score, 0.99)
+        evidence = "ask pressure, negative trade delta and bearish microprice"
     else:
         return None
 
+    risk_pct = max(risk_pct, 0.0001)
     entry_band = mid * 0.00025
-    risk_pct = 0.0015
-    reward_pct = 0.0030
+    reward_pct = risk_pct * max(reward_risk_ratio, 1.0)
     if direction == "LONG":
         stop = mid * (1 - risk_pct)
         target = mid * (1 + reward_pct)
@@ -58,6 +67,9 @@ def generate_signal(symbol: str, features: dict[str, float], notional: float = 1
         take_profit=target,
         risk_amount=notional * risk_pct,
         score=score,
-        reason=f"imbalance={imbalance:.3f}, delta_3s={delta:.3f}, microprice_offset={offset:.2f}bps",
+        reason=(
+            f"{evidence}; imbalance={imbalance:.3f}, delta_3s={delta:.3f}, "
+            f"microprice_offset={offset:.2f}bps, spread={spread:.2f}bps"
+        ),
         features=features,
     )
