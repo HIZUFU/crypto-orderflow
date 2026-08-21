@@ -4,12 +4,12 @@ import logging
 from datetime import timedelta
 from time import monotonic
 
-import websockets
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config import Settings
 from app.db.models import Alert, PaperTrade, utc_now
+from app.exchanges import get_exchange
 from app.market.candles import CandleAggregator
 from app.market.features import FeatureEngine, TradeEvent
 from app.market.orderbook import LocalOrderBook
@@ -22,6 +22,14 @@ class MarketService:
     def __init__(self, settings: Settings, session_factory: async_sessionmaker) -> None:
         self.settings = settings
         self.session_factory = session_factory
+        
+        # Initialize exchange
+        self.exchange = get_exchange(
+            settings.default_exchange,
+            ws_url=settings.bybit_ws_url if settings.default_exchange == "bybit" else settings.binance_ws_url,
+            depth=settings.orderbook_depth,
+        )
+        
         self.books = {symbol: LocalOrderBook() for symbol in settings.tracked_symbols}
         self.engines = {symbol: FeatureEngine(self.books[symbol]) for symbol in settings.tracked_symbols}
         self.candles = {symbol: CandleAggregator(symbol) for symbol in settings.tracked_symbols}
@@ -64,54 +72,53 @@ class MarketService:
                     pass
 
     async def _stream_once(self) -> None:
-        args = []
-        for symbol in self.settings.tracked_symbols:
-            args.append(f"orderbook.{self.settings.orderbook_depth}.{symbol}")
-            args.append(f"publicTrade.{symbol}")
-        async with websockets.connect(self.settings.bybit_ws_url, ping_interval=20, ping_timeout=20) as socket:
-            await socket.send(json.dumps({"op": "subscribe", "args": args}))
-            async for raw_message in socket:
+        """Stream market data using exchange adapter."""
+        try:
+            async for update in self.exchange.subscribe(self.settings.tracked_symbols):
                 if self._stop.is_set():
                     return
-                await self._handle_message(json.loads(raw_message))
-
-    async def _handle_message(self, message: dict) -> None:
-        topic = message.get("topic", "")
-        data = message.get("data") or {}
-        if topic.startswith("orderbook."):
-            symbol = data.get("s")
-            if symbol not in self.books:
-                return
-            self.books[symbol].apply(
-                message.get("type", "snapshot"),
-                data.get("b", []),
-                data.get("a", []),
-                int(data.get("u", 0)),
-                int(message.get("ts", 0)),
-            )
-            features = self.engines[symbol].calculate()
-            if features is not None:
-                self.latest[symbol] = features
-                await self._maybe_alert(symbol, features)
-        elif topic.startswith("publicTrade."):
-            for trade in message.get("data", []):
-                symbol = trade.get("s")
-                if symbol in self.engines:
-                    trade_event = TradeEvent(
-                        timestamp_ms=int(trade["T"]),
-                        price=float(trade["p"]),
-                        quantity=float(trade["v"]),
-                        side=trade["S"],
-                    )
-                    self.engines[symbol].observe_trade(trade_event)
+                
+                # Handle order book updates
+                if hasattr(update, 'bids'):
+                    symbol = update.symbol
+                    if symbol not in self.books:
+                        continue
                     
-                    # Also feed to candle aggregator
-                    if symbol in self.candles:
-                        self.candles[symbol].add_trade(
-                            timestamp_ms=trade_event.timestamp_ms,
-                            price=trade_event.price,
-                            volume=trade_event.quantity,
+                    self.books[symbol].apply(
+                        "snapshot" if update.is_snapshot else "delta",
+                        update.bids,
+                        update.asks,
+                        update.update_id,
+                        update.timestamp_ms,
+                    )
+                    
+                    features = self.engines[symbol].calculate()
+                    if features is not None:
+                        self.latest[symbol] = features
+                        await self._maybe_alert(symbol, features)
+                
+                # Handle trade updates
+                elif hasattr(update, 'price'):
+                    symbol = update.symbol
+                    if symbol in self.engines:
+                        trade_event = TradeEvent(
+                            timestamp_ms=update.timestamp_ms,
+                            price=update.price,
+                            quantity=update.quantity,
+                            side=update.side,
                         )
+                        self.engines[symbol].observe_trade(trade_event)
+                        
+                        # Feed to candle aggregator
+                        if symbol in self.candles:
+                            self.candles[symbol].add_trade(
+                                timestamp_ms=trade_event.timestamp_ms,
+                                price=trade_event.price,
+                                volume=trade_event.quantity,
+                            )
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+            raise
 
     async def _maybe_alert(self, symbol: str, features: dict[str, float]) -> None:
         now = monotonic()
@@ -140,10 +147,11 @@ class MarketService:
                     score=signal.score,
                     reason=signal.reason,
                     features_json=json.dumps(signal.features),
+                    exchange=self.exchange.name,
                 )
             )
             await session.commit()
-        logger.info("paper alert %s %s score=%.3f", symbol, signal.direction, signal.score)
+        logger.info("paper alert %s %s %s score=%.3f", self.exchange.name, symbol, signal.direction, signal.score)
 
     async def _monitor_positions(self) -> None:
         """Monitor open paper trades and close them if stop/target is hit."""
