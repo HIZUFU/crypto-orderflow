@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const fmt = (value, digits = 4) => value == null ? "-" : Number(value).toFixed(digits);
-const esc = (value) => String(value ?? "").replace(/[&<>\"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));
 
 async function get(path, options = {}) {
   const response = await fetch(path, options);
@@ -36,24 +36,110 @@ function renderMarket(market) {
 
 function renderTrades(trades) {
   const open = trades.filter((trade) => trade.status === "open");
-  $("trades").innerHTML = open.length ? `<table><thead><tr><th>symbol</th><th>side</th><th>entry</th><th>stop</th><th>target</th></tr></thead><tbody>${open.map((trade) => `<tr><td>${esc(trade.symbol)}</td><td class="${trade.direction === "LONG" ? "positive" : "negative"}">${trade.direction}</td><td>${fmt(trade.entry_price, 2)}</td><td>${fmt(trade.stop_loss, 2)}</td><td>${fmt(trade.take_profit, 2)}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">No open paper trades</div>';
+  $("trades").innerHTML = open.length ? `<table>
+    <thead>
+      <tr>
+        <th>symbol</th>
+        <th>side</th>
+        <th>entry</th>
+        <th>current</th>
+        <th>stop</th>
+        <th>target</th>
+        <th>unrealized PnL</th>
+        <th>action</th>
+      </tr>
+    </thead>
+    <tbody>${open.map((trade) => {
+      const pnlClass = trade.unrealized_pnl != null ? (trade.unrealized_pnl >= 0 ? "positive" : "negative") : "";
+      return `<tr>
+        <td>${esc(trade.symbol)}</td>
+        <td class="${trade.direction === "LONG" ? "positive" : "negative"}">${trade.direction}</td>
+        <td>${fmt(trade.entry_price, 2)}</td>
+        <td>${trade.current_price != null ? fmt(trade.current_price, 2) : "-"}</td>
+        <td>${fmt(trade.stop_loss, 2)}</td>
+        <td>${fmt(trade.take_profit, 2)}</td>
+        <td class="${pnlClass}">${trade.unrealized_pnl != null ? fmt(trade.unrealized_pnl, 4) + " USDT" : "-"}</td>
+        <td><button class="button button-small" onclick="closeTrade(${trade.id}, ${trade.current_price})">close</button></td>
+      </tr>`;
+    }).join("")}</tbody>
+  </table>` : '<div class="empty">No open paper trades</div>';
 }
 
 function renderAlerts(alerts) {
-  $("alerts").innerHTML = alerts.length ? `<table><thead><tr><th>time</th><th>symbol</th><th>side</th><th>score</th><th>entry</th><th>risk</th><th>action</th></tr></thead><tbody>${alerts.map((alert) => `<tr><td>${new Date(alert.created_at).toLocaleTimeString()}</td><td>${esc(alert.symbol)}</td><td class="${alert.direction === "LONG" ? "positive" : "negative"}">${alert.direction}</td><td>${fmt(alert.score * 100, 1)}%</td><td>${fmt(alert.reference_price, 2)}</td><td>${fmt(alert.risk_amount, 4)} USDT</td><td>${alert.status === "paper_opened" ? '<span class="muted">opened</span>' : `<button class="button" onclick="openPaper(${alert.id})">paper</button>`}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">No alerts yet</div>';
+  $("alerts").innerHTML = alerts.length ? `<table>
+    <thead>
+      <tr>
+        <th>time</th>
+        <th>symbol</th>
+        <th>side</th>
+        <th>score</th>
+        <th>entry</th>
+        <th>risk</th>
+        <th>reason</th>
+        <th>action</th>
+      </tr>
+    </thead>
+    <tbody>${alerts.map((alert) => {
+      const timeStr = new Date(alert.created_at).toLocaleTimeString();
+      const reasonShort = alert.reason.length > 50 ? alert.reason.substring(0, 47) + "..." : alert.reason;
+      return `<tr>
+        <td>${timeStr}</td>
+        <td>${esc(alert.symbol)}</td>
+        <td class="${alert.direction === "LONG" ? "positive" : "negative"}">${alert.direction}</td>
+        <td>${fmt(alert.score * 100, 1)}%</td>
+        <td>${fmt(alert.reference_price, 2)}</td>
+        <td>${fmt(alert.risk_amount, 4)} USDT</td>
+        <td title="${esc(alert.reason)}">${esc(reasonShort)}</td>
+        <td>${alert.status === "paper_opened" ? '<span class="muted">opened</span>' : `<button class="button" onclick="openPaper(${alert.id})">paper</button>`}</td>
+      </tr>`;
+    }).join("")}</tbody>
+  </table>` : '<div class="empty">No alerts yet</div>';
 }
 
 async function openPaper(id) {
-  try { await get(`/api/alerts/${id}/paper`, {method:"POST"}); await refresh(); }
+  try { 
+    await get(`/api/alerts/${id}/paper`, {method:"POST"}); 
+    await refresh(); 
+  }
   catch (error) { window.alert(error.message); }
+}
+
+async function closeTrade(id, currentPrice) {
+  if (!currentPrice) {
+    window.alert("Current price not available");
+    return;
+  }
+  if (!confirm(`Close trade at ${fmt(currentPrice, 2)}?`)) {
+    return;
+  }
+  try {
+    await get(`/api/paper-trades/${id}/close`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({exit_price: currentPrice, reason: "manual"})
+    });
+    await refresh();
+  } catch (error) {
+    window.alert(error.message);
+  }
 }
 
 async function refresh() {
   try {
-    const [health, market, alerts, trades] = await Promise.all([get("/api/health"), get("/api/market"), get("/api/alerts"), get("/api/paper-trades")]);
-    renderStatus(health, alerts, trades); renderMarket(market); renderAlerts(alerts); renderTrades(trades);
+    const [health, market, alerts, trades] = await Promise.all([
+      get("/api/health"), 
+      get("/api/market"), 
+      get("/api/alerts"), 
+      get("/api/paper-trades")
+    ]);
+    renderStatus(health, alerts, trades); 
+    renderMarket(market); 
+    renderAlerts(alerts); 
+    renderTrades(trades);
     $("updated").textContent = new Date().toLocaleTimeString();
-  } catch (error) { $("updated").textContent = "API unavailable"; }
+  } catch (error) { 
+    $("updated").textContent = "API unavailable"; 
+  }
 }
 refresh();
 setInterval(refresh, 2000);
