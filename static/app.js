@@ -16,6 +16,11 @@ function renderStatus(health, alerts, trades) {
     ["alerts", alerts.length],
     ["open paper", open],
   ].map(([label, value]) => `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value">${esc(value)}</div></div>`).join("");
+  
+  // Update exchange badge
+  if ($("exchange-badge")) {
+    $("exchange-badge").textContent = health.exchange?.toUpperCase() || "BYBIT";
+  }
 }
 
 function renderMarket(market) {
