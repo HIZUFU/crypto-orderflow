@@ -1,99 +1,95 @@
-# Crypto Orderflow
+# Orderflow Lab v1.0
 
-Private, paper-only order-flow analytics and alerting platform for crypto markets.
+Paper-only order-flow analytics with a live market dashboard, alert journal, chart workspace, paper PnL and CatBoost research pipeline.
 
-The first slice connects to Bybit public linear-market WebSocket streams, maintains a local L2 order book, calculates transparent order-flow features, generates experimental alerts, and records paper trades through a local web dashboard.
+## What Is Included
 
-**Real order execution is not implemented.** `LIVE_TRADING_ENABLED=false` is a hard product boundary for this version. Do not add exchange write permissions until the paper engine, tests, and risk controls have been independently validated.
+- Public Bybit linear WebSocket for L2 order book and public trades.
+- Exchange adapter boundary for Bybit and Binance market streams.
+- Transparent features: weighted book imbalance, microprice, spread, trade delta, intensity and log-return volatility.
+- Rule-based LONG/SHORT candidates with explicit evidence, risk, stop and target.
+- Paper execution only with automatic stop/target closure and live unrealized PnL.
+- Alert journal: every alert is tracked as pending, opened, skipped, expired or completed.
+- Hypothetical mark-to-market result for alerts that expired without a paper trade.
+- Chart workspace with candles, alert markers, order book depth and feature snapshot.
+- PnL analytics with realized/unrealized PnL, win rate, profit factor, drawdown and equity curve.
+- CatBoost meta-labeling pipeline with a shared train/inference feature contract.
+- Local SQLite schema migration so an existing `data/orderflow.db` is upgraded on startup.
 
-## Scope of v0.1
+Real order execution is intentionally unavailable. `TRADING_MODE=paper` and `LIVE_TRADING_ENABLED=false` remain product boundaries. Public market data does not require exchange API keys.
 
-- Bybit linear public WebSocket: order book and public trades.
-- BTCUSDT and ETHUSDT by default.
-- Weighted order-book imbalance, microprice, spread, trade delta, trade intensity, and short-term volatility.
-- Rule-based Order-Flow Momentum signal prototype.
-- Alert history and paper-trade journal.
-- FastAPI JSON API and a small browser dashboard.
-- SQLite for local development; PostgreSQL service in Docker Compose.
-- Tests for order-book reconstruction, features, strategy, and paper PnL.
-- **Quantitative stack:** NumPy for vectorized calculations, CatBoost for meta-labeling, Parquet for feature archives.
-
-This is research software, not financial advice and not a profit guarantee. A signal score is a screening value, not a probability until it has been calibrated against out-of-sample data.
-
-## Architecture: quantitative stack instead of deep learning
-
-The system uses **fast gradient boosting (CatBoost)** instead of neural networks, because:
-
-- CatBoost predicts in microseconds on CPU, no GPU required;
-- it works better with tabular financial data;
-- it rarely overfits on market noise;
-- rule-based strategy generates candidates, CatBoost filters weak ones (meta-labeling).
-
-**NumPy** handles all vector calculations in compiled C speed. **Parquet** stores feature history in compressed columnar format (10–100× faster than CSV). **ClickHouse** is documented for future scale (hundreds of symbols), but not required for v0.1.
-
-See [docs/ml.md](docs/ml.md) for the full training pipeline.
-
-## Local run on D:
-
-Clone the repository into a folder on `D:`. The project does not require writing to `C:`.
+## Run On D:
 
 ```powershell
-New-Item -ItemType Directory -Force D:\Projects
-Set-Location D:\Projects
+cd D:\Projects
+Remove-Item -Recurse -Force .\crypto-orderflow -ErrorAction SilentlyContinue
 git clone https://github.com/HIZUFU/crypto-orderflow.git
-Set-Location crypto-orderflow
+cd .\crypto-orderflow
 
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-
-pip install -e ".[dev]"
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 Copy-Item .env.example .env
-New-Item -ItemType Directory -Force data
-
-pytest
-ruff check .
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 Open `http://127.0.0.1:8000`.
 
-## Docker run
+The startup migration preserves existing alerts and trades. Do not delete `data/orderflow.db` unless you intentionally want a fresh paper journal.
 
-Configure Docker Desktop to keep its disk image on `D:` before starting it.
+## Pages
+
+- `/` - Trading desk with live market pressure, active alerts and open paper positions.
+- `/chart.html` - Candles, order book depth, feature snapshot and alert markers.
+- `/alerts.html` - Full alert journal with filters and detail reports.
+- `/pnl.html` - Paper PnL, equity curve and trade journal.
+- `/ml.html` - CatBoost model status and training readiness.
+- `/settings.html` - Runtime settings and watchlist management.
+
+## API Checks
 
 ```powershell
-Copy-Item .env.example .env
-docker compose up --build
+Invoke-RestMethod http://127.0.0.1:8000/api/health
+Invoke-RestMethod http://127.0.0.1:8000/api/market
+Invoke-RestMethod http://127.0.0.1:8000/api/orderbook/BTCUSDT
+Invoke-RestMethod http://127.0.0.1:8000/api/alerts/analytics
+Invoke-RestMethod http://127.0.0.1:8000/api/stats/pnl
+Invoke-RestMethod http://127.0.0.1:8000/api/ml/status
 ```
 
-The Compose profile uses PostgreSQL and starts the app at `http://127.0.0.1:8000`.
+## Alert And PnL Workflow
 
-## Tests
+1. Wait for `books_ready` to show `2/2` and for the feed to produce a candidate.
+2. Open a currently active alert with `Open paper`. Expired alerts are deliberately blocked.
+3. The alert detail report stores the feature snapshot, reason, rule score, ML probability, entry, stop and target.
+4. The position closes automatically at stop/target or can be closed manually.
+5. `/alerts.html` records the action event and final result.
+6. `/pnl.html` includes only paper trades opened from issued alerts.
+
+## CatBoost Workflow
+
+Collect at least 50 closed paper trades first:
 
 ```powershell
-pytest
-ruff check .
-```
-
-## ML training workflow
-
-After collecting paper trades for several days:
-
-```powershell
-pip install -e ".[ml]"
 python -m app.ml.export
 python -m app.ml.train
 ```
 
-This exports alerts/trades to Parquet, trains a CatBoost model, and saves it to `data/models/signal_filter.cbm`. Enable the filter with `USE_ML_FILTER=true` in `.env` and restart.
+The training command uses completed trades only, keeps a time-ordered holdout, reports accuracy/AUC and writes `data/models/signal_filter.cbm`. Enable only after reviewing the out-of-sample result:
 
-Details: [docs/ml.md](docs/ml.md)
+```text
+USE_ML_FILTER=true
+ML_THRESHOLD=0.55
+```
 
-## Repository boundaries
+CatBoost is a meta-label filter for rule candidates, not a neural network and not a guarantee of profitable predictions. The model must be retrained when the strategy, symbols, features or risk model changes.
 
-- Never commit `.env`, exchange secrets, Telegram tokens, database dumps, raw market archives, or account screenshots.
-- Public market streams need no private API key.
-- Future account access must use a dedicated key with no withdrawals, transfers, or account-management permissions.
-- This repository currently has no live order endpoint or live execution adapter.
+## Verification
 
-See [docs/setup.md](docs/setup.md), [docs/architecture.md](docs/architecture.md), [docs/security.md](docs/security.md), [docs/fees.md](docs/fees.md), and [docs/ml.md](docs/ml.md).
+```powershell
+python -m pytest
+python -m ruff check .
+```
+
+The repository intentionally ignores `.venv/`, `*.egg-info/`, `data/` and `.env`.

@@ -25,6 +25,6 @@ async def lifespan(app: FastAPI):
         await service.stop()
 
 
-app = FastAPI(title="Crypto Orderflow", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Orderflow Lab", version="1.0.0", lifespan=lifespan)
 app.include_router(router)
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

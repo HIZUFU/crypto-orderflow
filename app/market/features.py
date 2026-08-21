@@ -1,5 +1,7 @@
+import math
 from collections import deque
 from dataclasses import dataclass
+from statistics import pstdev
 from time import time
 
 from app.market.orderbook import LocalOrderBook
@@ -30,8 +32,10 @@ class FeatureEngine:
         if best is None:
             return None
         bid, ask = best
-        mid = (float(bid.price) + float(ask.price)) / 2
-        spread_bps = (float(ask.price - bid.price) / mid) * 10_000
+        bid_price = float(bid.price)
+        ask_price = float(ask.price)
+        mid = (bid_price + ask_price) / 2
+        spread_bps = ((ask_price - bid_price) / mid) * 10_000
         bids, asks = self.book.top(depth)
 
         bid_weighted = sum(float(level.quantity) / (index + 1) for index, level in enumerate(bids))
@@ -41,7 +45,7 @@ class FeatureEngine:
 
         bid_qty = float(bid.quantity)
         ask_qty = float(ask.quantity)
-        microprice = ((float(ask.price) * bid_qty) + (float(bid.price) * ask_qty)) / (bid_qty + ask_qty) if bid_qty + ask_qty else mid
+        microprice = ((ask_price * bid_qty) + (bid_price * ask_qty)) / (bid_qty + ask_qty) if bid_qty + ask_qty else mid
 
         now_ms = int(time() * 1000)
         recent = [trade for trade in self.trades if trade.timestamp_ms >= now_ms - 3_000]
@@ -54,7 +58,8 @@ class FeatureEngine:
         while self.mid_history and self.mid_history[0][0] < now_ms / 1000 - 30:
             self.mid_history.popleft()
         prices = [price for _, price in self.mid_history]
-        volatility = (max(prices) - min(prices)) / mid if prices else 0.0
+        returns = [math.log(current / previous) for previous, current in zip(prices, prices[1:]) if previous > 0 and current > 0]
+        volatility = pstdev(returns) if len(returns) > 1 else 0.0
 
         return {
             "mid_price": mid,

@@ -1,47 +1,28 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Crypto Orderflow</title>
-  <link rel="stylesheet" href="/app.css">
+  <title>Orderflow Lab | Dashboard</title>
+  <link rel="stylesheet" href="/app.css?v=1">
 </head>
 <body>
   <header class="topbar">
-    <div>
-      <span class="eyebrow">ORDERFLOW LAB</span>
-      <h1>Market monitor</h1>
-    </div>
-    <nav class="nav">
-      <a href="/" class="nav-link active">Dashboard</a>
-      <a href="/chart.html" class="nav-link">Charts</a>
-      <a href="/pnl.html" class="nav-link">PnL</a>
-    </nav>
-    <div class="topbar-right">
-      <div id="exchange-badge" class="exchange-badge"></div>
-      <div id="mode" class="mode">PAPER ONLY</div>
-    </div>
+    <a class="brand" href="/"><span class="brand-mark">OF</span><span><b>ORDERFLOW</b><small>market intelligence</small></span></a>
+    <nav class="nav"><a class="active" href="/">Dashboard</a><a href="/chart.html">Charts</a><a href="/alerts.html">Alert journal</a><a href="/pnl.html">PnL</a><a href="/ml.html">ML lab</a><a href="/settings.html">Settings</a></nav>
+    <div class="top-actions"><span id="exchange-badge" class="badge blue">BYBIT</span><span class="mode-badge">PAPER ONLY</span><span id="connection-dot" class="connection"><i></i> connecting</span></div>
   </header>
-  <main>
-    <section class="status-grid" id="status"></section>
-    <section class="layout">
-      <article class="panel wide">
-        <div class="panel-header"><h2>Market state</h2><span id="updated">waiting for stream</span></div>
-        <div id="market" class="market-grid"></div>
-      </article>
-      <article class="panel">
-        <div class="panel-header"><h2>Open paper trades</h2></div>
-        <div id="trades" class="table-wrap"></div>
-      </article>
-      <article class="panel wide">
-        <div class="panel-header">
-          <h2>Alerts</h2>
-          <button class="icon-button" title="Refresh" onclick="refresh()">Refresh</button>
-        </div>
-        <div id="alerts" class="table-wrap"></div>
-      </article>
+  <main class="shell">
+    <section class="page-heading"><div><p class="eyebrow">LIVE ORDER FLOW</p><h1>Trading desk</h1><p class="subhead">Signals, market pressure and paper execution in one view.</p></div><div class="heading-meta"><span id="last-update">waiting for stream</span><button class="button secondary" onclick="refresh()">Refresh</button></div></section>
+    <section id="summary" class="metric-grid"></section>
+    <section class="market-panel panel"><div class="section-heading"><div><h2>Market pressure</h2><p>Current L2 and tape features used by the signal engine.</p></div><a class="text-link" href="/chart.html">Open chart workspace <span>-></span></a></div><div id="market" class="market-grid"></div></section>
+    <section class="desk-grid">
+      <section class="panel feed-panel"><div class="section-heading"><div><h2>Active signal feed</h2><p>Newest rule-based candidates with full evidence.</p></div><a class="text-link" href="/alerts.html">View journal <span>-></span></a></div><div id="alerts" class="alert-feed"></div></section>
+      <aside class="side-stack"><section class="panel"><div class="section-heading"><div><h2>Open paper</h2><p>Live mark-to-market.</p></div><a class="text-link" href="/pnl.html">PnL <span>-></span></a></div><div id="trades"></div></section><section class="panel"><div class="section-heading"><div><h2>Signal mix</h2><p>Outcome tracking for issued alerts.</p></div></div><div id="outcome-mix" class="outcome-mix"></div></section></aside>
     </section>
   </main>
-  <script src="/app.js"></script>
+  <div id="toast" class="toast" role="status"></div>
+  <dialog id="alert-dialog" class="dialog"><button class="dialog-close" onclick="closeDialog()">x</button><div id="alert-detail"></div></dialog>
+  <script src="/app.js?v=1"></script>
 </body>
 </html>
