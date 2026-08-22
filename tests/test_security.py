@@ -1,3 +1,6 @@
+import pytest
+from cryptography.fernet import InvalidToken
+
 from app.security import decrypt_secret, encrypt_secret, mask_secret
 
 
@@ -9,6 +12,11 @@ def test_credentials_round_trip_and_masking() -> None:
     assert decrypt_secret(ciphertext) == plaintext
     assert mask_secret(plaintext) == "secr...3456"
     assert plaintext not in mask_secret(plaintext)
+
+
+def test_invalid_ciphertext_is_not_decrypted() -> None:
+    with pytest.raises(InvalidToken):
+        decrypt_secret("not-a-valid-fernet-token")
 
 
 def test_empty_credentials_are_not_stored() -> None:

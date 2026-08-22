@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -128,15 +129,24 @@ async def latest_outcomes(ids: list[int], session: AsyncSession) -> dict[int, Al
     return latest
 
 
+def _masked_credential(ciphertext: str | None) -> str | None:
+    if not ciphertext:
+        return None
+    try:
+        return mask_secret(decrypt_secret(ciphertext))
+    except InvalidToken:
+        return "unavailable"
+
+
 def connection_json(connection: ExchangeConnection) -> dict:
     return {
         "id": connection.id, "label": connection.label, "provider": connection.provider,
         "market_type": connection.market_type, "symbols": json.loads(connection.symbols_json or "[]"),
         "enabled": connection.enabled, "ws_url": connection.ws_url,
         "has_api_key": bool(connection.api_key_ciphertext),
-        "api_key_masked": mask_secret(decrypt_secret(connection.api_key_ciphertext)),
+        "api_key_masked": _masked_credential(connection.api_key_ciphertext),
         "has_api_secret": bool(connection.api_secret_ciphertext),
-        "api_secret_masked": mask_secret(decrypt_secret(connection.api_secret_ciphertext)),
+        "api_secret_masked": _masked_credential(connection.api_secret_ciphertext),
         "created_at": _aware(connection.created_at).isoformat(),
     }
 
@@ -565,9 +575,4 @@ async def ml_status(request: Request, session: AsyncSession = Depends(get_sessio
         "enabled": settings.use_ml_filter,
         "active": bool(service.ml_filter and service.ml_filter.model),
         "model_path": str(model_path), "model_exists": model_path.exists(),
-        "threshold": settings.ml_threshold, "feature_columns": FEATURE_COLUMNS,
-        "closed_trades": len(closed),
-        "wins": sum(bool(item.pnl and item.pnl > 0) for item in closed),
-        "losses": sum(bool(item.pnl is not None and item.pnl <= 0) for item in closed),
-        "outcomes": len(outcomes), "training_ready": len(closed) >= 50,
-    }
+        

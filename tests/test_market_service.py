@@ -1,4 +1,5 @@
 from app.config import Settings
+from app.exchanges.binance import BinanceExchange
 from app.market.service import ConnectionSpec, MarketService, default_ws_url
 
 
@@ -9,9 +10,9 @@ def test_default_stream_urls_cover_spot_and_linear() -> None:
     assert "fstream.binance.com" in default_ws_url("binance", "linear")
 
 
-def test_configured_binance_endpoint_is_combined_stream_compatible() -> None:
-    settings = Settings(binance_ws_url="wss://fstream.binance.com/ws")
-    assert settings.binance_ws_url.endswith("/ws")
+def test_binance_legacy_ws_endpoint_normalizes_to_combined_stream() -> None:
+    exchange = BinanceExchange(ws_url="wss://fstream.binance.com/ws")
+    assert exchange._stream_url(["btcusdt@aggTrade"]) == "wss://fstream.binance.com/stream?streams=btcusdt@aggTrade"
 
 
 def test_sources_are_isolated_by_connection_and_symbol() -> None:
