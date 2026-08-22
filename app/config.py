@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     default_exchange: str = "bybit"
     bybit_ws_url: str = "wss://stream.bybit.com/v5/public/linear"
-    binance_ws_url: str = "wss://fstream.binance.com/ws"
+    binance_ws_url: str = "wss://fstream.binance.com/stream"
     symbols: str = "BTCUSDT,ETHUSDT"
     orderbook_depth: int = 50
     reconnect_delay_seconds: float = 5.0

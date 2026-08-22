@@ -19,6 +19,14 @@ def test_long_signal_requires_confirming_flow() -> None:
     assert signal.stop_loss < signal.reference_price < signal.take_profit
 
 
+def test_fixed_risk_value_controls_stop_distance() -> None:
+    signal = generate_signal("BTCUSDT", base_features(), notional=50.0, risk_value=5.0, risk_mode="fixed_usdt")
+    assert signal is not None
+    assert signal.risk_amount == 5.0
+    assert signal.stop_loss == 90.0
+    assert signal.take_profit == 120.0
+
+
 def test_wide_spread_is_blocked() -> None:
     features = base_features()
     features["spread_bps"] = 10.0
