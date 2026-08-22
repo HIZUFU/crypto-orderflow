@@ -1,4 +1,4 @@
-"""Binance spot and USD-M futures public market adapter."""
+"""Binance spot and USD-M futures public market data adapter."""
 import asyncio
 import json
 import logging
@@ -33,17 +33,17 @@ class BinanceExchange(Exchange):
 
     async def subscribe(self, symbols: list[str]):
         streams = []
-        normalized_symbols = [self.normalize_symbol(symbol) for symbol in symbols]
-        for normalized in normalized_symbols:
+        for symbol in symbols:
+            normalized = self.normalize_symbol(symbol)
             streams.extend((f"{normalized}@depth{self.depth}@100ms", f"{normalized}@aggTrade"))
         stream_url = f"{self.ws_url}?streams={'/'.join(streams)}"
         async with websockets.connect(stream_url, ping_interval=20, ping_timeout=20) as socket:
-            # The socket is connected before snapshots are requested, so buffered depth
-            # events can be validated against each REST lastUpdateId.
+            # Connect before snapshots so buffered events can be checked against REST ids.
             snapshots = await asyncio.gather(*(self._snapshot(symbol) for symbol in symbols))
             last_update = {snapshot.symbol: snapshot.update_id for snapshot in snapshots}
             synced = {snapshot.symbol: False for snapshot in snapshots}
-            yield from snapshots
+            for snapshot in snapshots:
+                yield snapshot
             logger.info("Binance subscribed to %s symbols", len(symbols))
             async for raw_message in socket:
                 message = json.loads(raw_message)
@@ -62,7 +62,6 @@ class BinanceExchange(Exchange):
                         if first_update > snapshot_id + 1:
                             snapshot = await self._snapshot(upper_symbol)
                             last_update[upper_symbol] = snapshot.update_id
-                            synced[upper_symbol] = False
                             yield snapshot
                             continue
                         if not (first_update <= snapshot_id + 1 <= final_update):

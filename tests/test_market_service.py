@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from app.config import Settings
 from app.market.service import ConnectionSpec, MarketService, default_ws_url
 
