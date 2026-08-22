@@ -1,18 +1,18 @@
 """Export alert outcomes and paper trades to training-ready Parquet data."""
 import asyncio
 import json
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 from sqlalchemy import select
 
+from app.config import get_settings
 from app.db.models import Alert, AlertOutcome, PaperTrade
 from app.db.session import session_factory
+from app.ml.labels import labeled_alert_rows
 
-
-TERMINAL_OUTCOMES = {"expired", "take_profit", "stop_loss", "manual"}
+settings = get_settings()
 
 
 def _features(alert: Alert) -> dict[str, float]:
@@ -22,45 +22,20 @@ def _features(alert: Alert) -> dict[str, float]:
         return {}
 
 
-def _training_rows(
-    alerts: list[Alert], outcomes: list[AlertOutcome], trades: list[PaperTrade]
-) -> list[dict]:
-    outcomes_by_alert: dict[int, list[AlertOutcome]] = defaultdict(list)
-    trades_by_alert: dict[int, list[PaperTrade]] = defaultdict(list)
-    for outcome in outcomes:
-        outcomes_by_alert[outcome.alert_id].append(outcome)
-    for trade in trades:
-        trades_by_alert[trade.alert_id].append(trade)
+async def export_training_to_parquet(output_dir: Path = Path("data/history")) -> dict:
+    """Build one deduplicated dataset from every alert with a measured outcome."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    async with session_factory() as session:
+        alerts = list((await session.execute(select(Alert).order_by(Alert.created_at))).scalars())
+        outcomes = list((await session.execute(select(AlertOutcome))).scalars())
+        trades = list((await session.execute(select(PaperTrade))).scalars())
 
-    rows: list[dict] = []
-    for alert in alerts:
-        pnl = None
-        label_source = None
-        closed = sorted(
-            (trade for trade in trades_by_alert[alert.id] if trade.status == "closed" and trade.pnl is not None),
-            key=lambda trade: trade.closed_at or trade.opened_at,
-            reverse=True,
-        )
-        if closed:
-            pnl = float(closed[0].pnl)
-            label_source = "paper_trade"
-        else:
-            marked = sorted(
-                (
-                    outcome
-                    for outcome in outcomes_by_alert[alert.id]
-                    if outcome.outcome_type in TERMINAL_OUTCOMES
-                    and outcome.hypothetical_pnl is not None
-                ),
-                key=lambda outcome: outcome.outcome_timestamp,
-                reverse=True,
-            )
-            if marked:
-                pnl = float(marked[0].hypothetical_pnl)
-                label_source = "expired_mark"
-        if pnl is None:
-            continue
-
+    labels = labeled_alert_rows(alerts, outcomes, trades, settings.paper_fee_rate)
+    if not labels:
+        raise ValueError("No alerts with a measured result found")
+    rows = []
+    for item in labels:
+        alert = item["alert"]
         row = {
             "alert_id": alert.id,
             "created_at": alert.created_at,
@@ -69,38 +44,27 @@ def _training_rows(
             "exchange": alert.exchange,
             "source_key": alert.source_key,
             "direction": alert.direction,
-            "score": alert.score,
+            "rule_score": alert.score,
             "reference_price": alert.reference_price,
             "stop_loss": alert.stop_loss,
             "take_profit": alert.take_profit,
-            "pnl": pnl,
-            "label": int(pnl > 0),
-            "label_source": label_source,
+            "pnl": item["pnl"],
+            "label": item["label"],
+            "label_source": item["label_source"],
         }
         row.update(_features(alert))
         rows.append(row)
-    return rows
-
-
-async def export_training_to_parquet(output_dir: Path = Path("data/history")) -> None:
-    """Build one deduplicated labeled dataset from all alerts with measured outcomes."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    async with session_factory() as session:
-        alerts = list((await session.execute(select(Alert).order_by(Alert.created_at))).scalars())
-        outcomes = list((await session.execute(select(AlertOutcome))).scalars())
-        trades = list((await session.execute(select(PaperTrade))).scalars())
-
-    rows = _training_rows(alerts, outcomes, trades)
-    if not rows:
-        raise ValueError("No alerts with a measured outcome found")
     dataset = pd.DataFrame(rows).sort_values("created_at")
     output_path = output_dir / "training.parquet"
     dataset.to_parquet(output_path, index=False, compression="snappy")
-    print(
-        f"Exported {len(dataset)} labeled alerts to {output_path} "
-        f"({int((dataset['label_source'] == 'paper_trade').sum())} paper, "
-        f"{int((dataset['label_source'] == 'expired_mark').sum())} expired-mark)"
-    )
+    result = {
+        "path": str(output_path),
+        "labeled_alerts": int(len(dataset)),
+        "paper_trade_labels": int((dataset["label_source"] == "paper_trade").sum()),
+        "expiry_mark_labels": int((dataset["label_source"] == "expiry_mark").sum()),
+    }
+    print(f"Exported {result['labeled_alerts']} labeled alerts to {output_path}")
+    return result
 
 
 async def export_alerts_to_parquet(output_dir: Path = Path("data/history")) -> None:
@@ -123,7 +87,7 @@ async def export_alerts_to_parquet(output_dir: Path = Path("data/history")) -> N
             "direction": alert.direction,
             "status": alert.status,
             "outcome_type": alert.outcome_type,
-            "score": alert.score,
+            "rule_score": alert.score,
             "reference_price": alert.reference_price,
             "stop_loss": alert.stop_loss,
             "take_profit": alert.take_profit,

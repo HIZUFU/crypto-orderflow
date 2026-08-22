@@ -1,4 +1,6 @@
 """Train a CatBoost meta-label model from all measured alert outcomes."""
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -21,8 +23,6 @@ def load_training_data(history_dir: Path = Path("data/history")) -> pd.DataFrame
 def train_catboost(
     dataset: pd.DataFrame, model_path: Path = Path("data/models/signal_filter.cbm")
 ) -> dict:
-    if "score" in dataset.columns and "rule_score" not in dataset.columns:
-        dataset = dataset.rename(columns={"score": "rule_score"})
     missing = [column for column in FEATURE_COLUMNS if column not in dataset.columns]
     if missing:
         raise ValueError(f"Missing training features: {', '.join(missing)}")
@@ -38,10 +38,6 @@ def train_catboost(
     if test.empty or train["label"].nunique() < 2 or test["label"].nunique() < 2:
         raise ValueError("Time split must contain both labels in train and test portions")
 
-    X_train = train[FEATURE_COLUMNS].fillna(0.0)
-    y_train = train["label"]
-    X_test = test[FEATURE_COLUMNS].fillna(0.0)
-    y_test = test["label"]
     model = CatBoostClassifier(
         iterations=400,
         depth=4,
@@ -50,21 +46,23 @@ def train_catboost(
         verbose=False,
         random_seed=42,
     )
-    model.fit(Pool(X_train, y_train))
-    probabilities = model.predict_proba(X_test)[:, 1]
+    model.fit(Pool(train[FEATURE_COLUMNS].fillna(0.0), train["label"]))
+    probabilities = model.predict_proba(test[FEATURE_COLUMNS].fillna(0.0))[:, 1]
     predictions = (probabilities >= 0.5).astype(int)
     metrics = {
+        "trained_at": datetime.now(timezone.utc).isoformat(),
         "samples": int(len(dataset)),
         "train_samples": int(len(train)),
         "test_samples": int(len(test)),
-        "paper_trade_labels": int((dataset.get("label_source") == "paper_trade").sum()),
-        "expired_mark_labels": int((dataset.get("label_source") == "expired_mark").sum()),
-        "test_accuracy": float(accuracy_score(y_test, predictions)),
-        "test_auc": float(roc_auc_score(y_test, probabilities)),
-        "label_rate": float(dataset["label"].mean()),
+        "paper_trade_labels": int((dataset["label_source"] == "paper_trade").sum()),
+        "expiry_mark_labels": int((dataset["label_source"] == "expiry_mark").sum()),
+        "test_accuracy": float(accuracy_score(test["label"], predictions)),
+        "test_auc": float(roc_auc_score(test["label"], probabilities)),
+        "win_rate": float(dataset["label"].mean()),
     }
     model_path.parent.mkdir(parents=True, exist_ok=True)
     model.save_model(str(model_path))
+    model_path.with_suffix(".metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     return metrics
 
 
