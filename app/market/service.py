@@ -268,7 +268,7 @@ class MarketService:
                 ml_passed_filter=ml_passed,
             ))
             await session.commit()
-        logger.info("alert %s %s %s score=%.3f", source_key, signal.direction, signal.score)
+        logger.info("alert %s %s score=%.3f", source_key, signal.direction, signal.score)
 
     def resolve_source(self, symbol: str, source_key: str | None = None) -> str | None:
         symbol = symbol.upper()
