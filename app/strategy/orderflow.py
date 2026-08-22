@@ -21,8 +21,9 @@ def generate_signal(
     features: dict[str, float],
     notional: float = 50.0,
     leverage: int = 1,
-    risk_pct: float = 0.0015,
+    risk_value: float = 0.0015,
     reward_risk_ratio: float = 2.0,
+    risk_mode: str = "percent_notional",
 ) -> Signal | None:
     """Generate a transparent order-flow candidate; this is not a calibrated probability."""
     del leverage
@@ -47,7 +48,15 @@ def generate_signal(
     else:
         return None
 
-    risk_pct = max(risk_pct, 0.0001)
+    if risk_mode == "fixed_usdt":
+        risk_amount = max(float(risk_value), 0.000001)
+        risk_pct = risk_amount / notional
+    else:
+        risk_pct = max(float(risk_value), 0.000001)
+        risk_amount = notional * risk_pct
+    if risk_pct >= 1:
+        return None
+
     entry_band = mid * 0.00025
     reward_pct = risk_pct * max(reward_risk_ratio, 1.0)
     if direction == "LONG":
@@ -65,7 +74,7 @@ def generate_signal(
         reference_price=mid,
         stop_loss=stop,
         take_profit=target,
-        risk_amount=notional * risk_pct,
+        risk_amount=risk_amount,
         score=score,
         reason=(
             f"{evidence}; imbalance={imbalance:.3f}, delta_3s={delta:.3f}, "

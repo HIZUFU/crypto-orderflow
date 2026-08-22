@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from time import monotonic
 
-from sqlalchemy import desc, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config import Settings
@@ -53,12 +53,7 @@ class MarketService:
         self.latest: dict[str, dict[str, float]] = {}
         self.last_signal_at: dict[str, float] = {}
         self.ml_filter: SignalFilter | None = None
-        if settings.use_ml_filter:
-            try:
-                self.ml_filter = SignalFilter(settings.model_path)
-                logger.info("CatBoost filter %s", "loaded" if self.ml_filter.model else "not available")
-            except Exception:
-                logger.exception("Could not load CatBoost filter")
+        self.refresh_ml_filter()
         self._tasks: list[asyncio.Task] = []
         self._task: asyncio.Task | None = None
         self._monitor_task: asyncio.Task | None = None
@@ -69,19 +64,47 @@ class MarketService:
     def stream_connected(self) -> bool:
         return any(not task.done() for task in self._tasks)
 
+    def refresh_ml_filter(self) -> None:
+        """Apply a runtime ML toggle without restarting public streams."""
+        self.ml_filter = None
+        if not self.settings.use_ml_filter:
+            return
+        try:
+            candidate = SignalFilter(self.settings.model_path)
+            self.ml_filter = candidate
+            logger.info("CatBoost filter %s", "loaded" if candidate.model else "not available")
+        except Exception:
+            logger.exception("Could not load CatBoost filter")
+
     async def _load_specs(self) -> list[ConnectionSpec]:
         async with self.session_factory() as session:
-            rows = list((await session.execute(select(ExchangeConnection).where(ExchangeConnection.enabled.is_(True)))).scalars())
+            rows = list((await session.execute(select(ExchangeConnection))).scalars())
         if not rows:
-            return [ConnectionSpec(None, f"{self.settings.default_exchange.title()} default", self.settings.default_exchange, "linear", None, tuple(self.settings.tracked_symbols))]
-        specs = []
+            return [ConnectionSpec(
+                None,
+                f"{self.settings.default_exchange.title()} default",
+                self.settings.default_exchange,
+                "linear",
+                None,
+                tuple(self.settings.tracked_symbols),
+            )]
+        specs: list[ConnectionSpec] = []
         for row in rows:
+            if not row.enabled:
+                continue
             try:
-                symbols = tuple(str(symbol).strip().upper() for symbol in json.loads(row.symbols_json or "[]") if str(symbol).strip())
+                symbols = tuple(
+                    str(symbol).strip().upper()
+                    for symbol in json.loads(row.symbols_json or "[]")
+                    if str(symbol).strip()
+                )
             except json.JSONDecodeError:
+                logger.warning("Ignoring malformed symbol list on connection %s", row.id)
                 symbols = ()
             if symbols:
-                specs.append(ConnectionSpec(row.id, row.label, row.provider, row.market_type, row.ws_url, symbols))
+                specs.append(ConnectionSpec(
+                    row.id, row.label, row.provider, row.market_type, row.ws_url, symbols
+                ))
         return specs
 
     def _prepare_sources(self, specs: list[ConnectionSpec]) -> None:
@@ -90,10 +113,18 @@ class MarketService:
         self.engines.clear()
         self.candles.clear()
         self.latest.clear()
+        self.last_signal_at.clear()
         for spec in specs:
             for symbol in spec.symbols:
                 source_key = f"{spec.identity}:{symbol}"
-                self.sources[source_key] = {"source_key": source_key, "connection_id": spec.id, "exchange": spec.provider, "market": spec.market_type, "label": spec.label, "symbol": symbol}
+                self.sources[source_key] = {
+                    "source_key": source_key,
+                    "connection_id": spec.id,
+                    "exchange": spec.provider,
+                    "market": spec.market_type,
+                    "label": spec.label,
+                    "symbol": symbol,
+                }
                 self.books[source_key] = LocalOrderBook()
                 self.engines[source_key] = FeatureEngine(self.books[source_key])
                 self.candles[source_key] = CandleAggregator(symbol)
@@ -102,11 +133,16 @@ class MarketService:
         specs = await self._load_specs()
         self._prepare_sources(specs)
         self._stop = asyncio.Event()
-        self._tasks = [asyncio.create_task(self._run_source(spec), name=f"market-{spec.identity}") for spec in specs]
+        self._tasks = [
+            asyncio.create_task(self._run_source(spec), name=f"market-{spec.identity}")
+            for spec in specs
+        ]
         self._task = asyncio.create_task(self._wait_streams(), name="market-stream-group")
         if self.settings.enable_auto_close:
             self._monitor_task = asyncio.create_task(self._monitor_positions(), name="position-monitor")
-        self._outcome_task = asyncio.create_task(self._monitor_alert_outcomes(), name="alert-outcome-monitor")
+        self._outcome_task = asyncio.create_task(
+            self._monitor_alert_outcomes(), name="alert-outcome-monitor"
+        )
 
     async def stop(self) -> None:
         self._stop.set()
@@ -131,39 +167,61 @@ class MarketService:
         ws_url = spec.ws_url or default_ws_url(spec.provider, spec.market_type)
         while not self._stop.is_set():
             try:
-                exchange = get_exchange(spec.provider, ws_url=ws_url, depth=self.settings.orderbook_depth)
+                exchange = get_exchange(
+                    spec.provider, ws_url=ws_url, depth=self.settings.orderbook_depth
+                )
                 async for update in exchange.subscribe(list(spec.symbols)):
                     if self._stop.is_set():
                         return
-                    symbol = update.symbol.upper()
-                    source_key = f"{spec.identity}:{symbol}"
+                    source_key = f"{spec.identity}:{update.symbol.upper()}"
                     if source_key not in self.sources:
                         continue
                     if hasattr(update, "bids"):
-                        self.books[source_key].apply("snapshot" if update.is_snapshot else "delta", update.bids, update.asks, update.update_id, update.timestamp_ms)
+                        self.books[source_key].apply(
+                            "snapshot" if update.is_snapshot else "delta",
+                            update.bids,
+                            update.asks,
+                            update.update_id,
+                            update.timestamp_ms,
+                        )
                         features = self.engines[source_key].calculate()
                         if features is not None:
                             self.latest[source_key] = features
                             await self._maybe_alert(spec, source_key, features)
                     elif hasattr(update, "price"):
-                        event = TradeEvent(update.timestamp_ms, update.price, update.quantity, update.side)
+                        event = TradeEvent(
+                            update.timestamp_ms, update.price, update.quantity, update.side
+                        )
                         self.engines[source_key].observe_trade(event)
-                        self.candles[source_key].add_trade(event.timestamp_ms, event.price, event.quantity)
+                        self.candles[source_key].add_trade(
+                            event.timestamp_ms, event.price, event.quantity
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("stream failed for %s; reconnecting", spec.label)
                 try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=self.settings.reconnect_delay_seconds)
+                    await asyncio.wait_for(
+                        self._stop.wait(), timeout=self.settings.reconnect_delay_seconds
+                    )
                 except asyncio.TimeoutError:
                     pass
 
-    async def _maybe_alert(self, spec: ConnectionSpec, source_key: str, features: dict[str, float]) -> None:
+    async def _maybe_alert(
+        self, spec: ConnectionSpec, source_key: str, features: dict[str, float]
+    ) -> None:
         now = monotonic()
         if now - self.last_signal_at.get(source_key, 0.0) < self.settings.signal_cooldown_seconds:
             return
-        symbol = self.sources[source_key]["symbol"]
-        signal = generate_signal(symbol, features, self.settings.paper_notional_usdt, self.settings.paper_leverage, self.settings.risk_value, self.settings.reward_risk_ratio)
+        signal = generate_signal(
+            self.sources[source_key]["symbol"],
+            features,
+            notional=self.settings.paper_notional_usdt,
+            leverage=self.settings.paper_leverage,
+            risk_value=self.settings.risk_value,
+            risk_mode=self.settings.risk_mode,
+            reward_risk_ratio=self.settings.reward_risk_ratio,
+        )
         if signal is None:
             return
         ml_probability = None
@@ -177,7 +235,29 @@ class MarketService:
         self.last_signal_at[source_key] = now
         created = utc_now()
         async with self.session_factory() as session:
-            session.add(Alert(created_at=created, expires_at=created + timedelta(seconds=self.settings.signal_ttl_seconds), symbol=symbol, market=spec.market_type, exchange=spec.provider, source_key=source_key, connection_id=spec.id, direction=signal.direction, entry_low=signal.entry_low, entry_high=signal.entry_high, reference_price=signal.reference_price, stop_loss=signal.stop_loss, take_profit=signal.take_profit, position_notional=self.settings.paper_notional_usdt, leverage=self.settings.paper_leverage, risk_amount=signal.risk_amount, score=signal.score, reason=signal.reason, features_json=json.dumps(signal.features), ml_probability=ml_probability, ml_passed_filter=ml_passed))
+            session.add(Alert(
+                created_at=created,
+                expires_at=created + timedelta(seconds=self.settings.signal_ttl_seconds),
+                symbol=self.sources[source_key]["symbol"],
+                market=spec.market_type,
+                exchange=spec.provider,
+                source_key=source_key,
+                connection_id=spec.id,
+                direction=signal.direction,
+                entry_low=signal.entry_low,
+                entry_high=signal.entry_high,
+                reference_price=signal.reference_price,
+                stop_loss=signal.stop_loss,
+                take_profit=signal.take_profit,
+                position_notional=self.settings.paper_notional_usdt,
+                leverage=self.settings.paper_leverage,
+                risk_amount=signal.risk_amount,
+                score=signal.score,
+                reason=signal.reason,
+                features_json=json.dumps(signal.features),
+                ml_probability=ml_probability,
+                ml_passed_filter=ml_passed,
+            ))
             await session.commit()
         logger.info("alert %s %s %s score=%.3f", source_key, signal.direction, signal.score)
 
@@ -185,7 +265,10 @@ class MarketService:
         symbol = symbol.upper()
         if source_key and source_key in self.sources:
             return source_key
-        return next((key for key, info in self.sources.items() if info["symbol"] == symbol), None)
+        return next(
+            (key for key, info in self.sources.items() if info["symbol"] == symbol),
+            None,
+        )
 
     async def _monitor_positions(self) -> None:
         while not self._stop.is_set():
@@ -196,19 +279,32 @@ class MarketService:
             except Exception:
                 logger.exception("position monitor error")
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=self.settings.position_monitor_interval_seconds)
+                await asyncio.wait_for(
+                    self._stop.wait(), timeout=self.settings.position_monitor_interval_seconds
+                )
             except asyncio.TimeoutError:
                 pass
 
     async def _check_positions(self) -> None:
         async with self.session_factory() as session:
-            trades = list((await session.execute(select(PaperTrade).where(PaperTrade.status == "open"))).scalars())
+            trades = list((await session.execute(
+                select(PaperTrade).where(PaperTrade.status == "open")
+            )).scalars())
             for trade in trades:
                 source_key = self.resolve_source(trade.symbol, trade.source_key)
                 current = (self.latest.get(source_key) or {}).get("mid_price") if source_key else None
                 if current is None:
                     continue
-                reason = "stop_loss" if (current <= trade.stop_loss if trade.direction == "LONG" else current >= trade.stop_loss) else "take_profit" if (current >= trade.take_profit if trade.direction == "LONG" else current <= trade.take_profit) else None
+                reason = None
+                if trade.direction == "LONG":
+                    if current <= trade.stop_loss:
+                        reason = "stop_loss"
+                    elif current >= trade.take_profit:
+                        reason = "take_profit"
+                elif current >= trade.stop_loss:
+                    reason = "stop_loss"
+                elif current <= trade.take_profit:
+                    reason = "take_profit"
                 if reason:
                     gross = ((current - trade.entry_price) / trade.entry_price) * trade.notional
                     if trade.direction == "SHORT":
@@ -222,7 +318,15 @@ class MarketService:
                     alert = await session.get(Alert, trade.alert_id)
                     if alert:
                         alert.outcome_type = reason
-                        session.add(AlertOutcome(alert_id=alert.id, paper_trade_id=trade.id, outcome_type=reason, outcome_timestamp=trade.closed_at, price_at_outcome=current, ml_probability=alert.ml_probability, ml_passed_filter=alert.ml_passed_filter))
+                        session.add(AlertOutcome(
+                            alert_id=alert.id,
+                            paper_trade_id=trade.id,
+                            outcome_type=reason,
+                            outcome_timestamp=trade.closed_at,
+                            price_at_outcome=current,
+                            ml_probability=alert.ml_probability,
+                            ml_passed_filter=alert.ml_passed_filter,
+                        ))
             await session.commit()
 
     async def _monitor_alert_outcomes(self) -> None:
@@ -234,14 +338,18 @@ class MarketService:
             except Exception:
                 logger.exception("alert outcome monitor error")
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=self.settings.outcome_monitor_interval_seconds)
+                await asyncio.wait_for(
+                    self._stop.wait(), timeout=self.settings.outcome_monitor_interval_seconds
+                )
             except asyncio.TimeoutError:
                 pass
 
     async def _check_expired_alerts(self) -> None:
         now = utc_now()
         async with self.session_factory() as session:
-            alerts = list((await session.execute(select(Alert).where(Alert.expires_at < now, Alert.outcome_type == "pending"))).scalars())
+            alerts = list((await session.execute(select(Alert).where(
+                Alert.expires_at < now, Alert.outcome_type == "pending"
+            ))).scalars())
             for alert in alerts:
                 alert.outcome_type = "expired"
                 source_key = self.resolve_source(alert.symbol, alert.source_key)
@@ -255,5 +363,15 @@ class MarketService:
                         hypothetical *= -1
                     reached_target = current >= alert.take_profit if alert.direction == "LONG" else current <= alert.take_profit
                     hit_stop = current <= alert.stop_loss if alert.direction == "LONG" else current >= alert.stop_loss
-                session.add(AlertOutcome(alert_id=alert.id, outcome_type="expired", outcome_timestamp=now, price_at_outcome=current, hypothetical_pnl=hypothetical, reached_target=reached_target, hit_stop=hit_stop, ml_probability=alert.ml_probability, ml_passed_filter=alert.ml_passed_filter))
+                session.add(AlertOutcome(
+                    alert_id=alert.id,
+                    outcome_type="expired",
+                    outcome_timestamp=now,
+                    price_at_outcome=current,
+                    hypothetical_pnl=hypothetical,
+                    reached_target=reached_target,
+                    hit_stop=hit_stop,
+                    ml_probability=alert.ml_probability,
+                    ml_passed_filter=alert.ml_passed_filter,
+                ))
             await session.commit()
