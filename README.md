@@ -1,18 +1,19 @@
-# Orderflow Lab v1.0
+# Orderflow Lab v1.1
 
-Paper-only order-flow analytics with a live market dashboard, alert journal, chart workspace, paper PnL and CatBoost research pipeline.
+Paper-only order-flow analytics with a multi-exchange market dashboard, source-aware alert journal, paper PnL and CatBoost research pipeline.
 
-## What Is Included
+## Included
 
-- Public Bybit linear WebSocket for L2 order book and public trades.
-- Exchange adapter boundary for Bybit and Binance market streams.
-- Transparent features: weighted book imbalance, microprice, spread, trade delta, intensity and log-return volatility.
+- Public Bybit and Binance adapters for spot and linear futures market data.
+- Multiple saved connections, each with its own exchange, market type and symbol list.
+- Public WebSocket streams without API keys, independent order books and feature engines per source.
+- Settings UI for connections, symbols, paper balance, position notional, risk mode, alert lifetime and ML threshold.
+- Optional local encrypted storage for API key and secret fields. Credentials are masked in API responses and are not used for orders or private account requests in this release.
+- Transparent features: weighted book imbalance, microprice, spread, trade delta, intensity and volatility.
 - Rule-based LONG/SHORT candidates with explicit evidence, risk, stop and target.
 - Paper execution only with automatic stop/target closure and live unrealized PnL.
-- Alert journal: every alert is tracked as pending, opened, skipped, expired or completed.
-- Hypothetical mark-to-market result for alerts that expired without a paper trade.
-- Chart workspace with candles, alert markers, order book depth and feature snapshot.
-- PnL analytics with realized/unrealized PnL, win rate, profit factor, drawdown and equity curve.
+- Alert journal: every alert is tracked as pending, opened, skipped, expired or completed and can be filtered by source.
+- PnL analytics with realized/unrealized PnL, win rate, profit factor, drawdown and source-aware trade journal.
 - CatBoost meta-labeling pipeline with a shared train/inference feature contract.
 - Local SQLite schema migration so an existing `data/orderflow.db` is upgraded on startup.
 
@@ -34,56 +35,53 @@ Copy-Item .env.example .env
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Open `http://127.0.0.1:8000`.
+Open `http://127.0.0.1:8000`. The startup migration preserves existing alerts and trades. Do not delete `data/orderflow.db` unless a fresh paper journal is intentional.
 
-The startup migration preserves existing alerts and trades. Do not delete `data/orderflow.db` unless you intentionally want a fresh paper journal.
+## Settings Workflow
+
+Open `/settings.html` and use:
+
+- `Overview` for stream, source, order book and CatBoost status.
+- `API / Connections` to add Bybit or Binance, choose `Spot` or `Futures / linear`, enter comma-separated symbols, enable/disable a connection or edit/delete it.
+- `Paper & Risk` to change paper balance, position notional, percent-of-notional risk or fixed-USDT risk, reward/risk ratio, alert lifetime and the ML threshold.
+
+Connections reload public streams after every save. A custom connection source is identified by `connection_id:SYMBOL`, so the same symbol on two exchanges remains isolated in charts, alerts, paper pricing and PnL.
+
+Credentials are optional. They are encrypted with the local `APP_SECRET_KEY`, never returned in plaintext and currently serve only as preparation for a future read-only private account adapter. Do not paste them into chat.
 
 ## Pages
 
-- `/` - Trading desk with live market pressure, active alerts and open paper positions.
-- `/chart.html` - Candles, order book depth, feature snapshot and alert markers.
-- `/alerts.html` - Full alert journal with filters and detail reports.
-- `/pnl.html` - Paper PnL, equity curve and trade journal.
+- `/` - Trading desk with live market pressure, source labels, active alerts and open paper positions.
+- `/chart.html` - Source selector, candles, order book depth, feature snapshot and source-filtered alert markers.
+- `/alerts.html` - Full alert journal with source, symbol, direction and outcome filters.
+- `/pnl.html` - Paper PnL, equity curve and source-aware trade journal.
 - `/ml.html` - CatBoost model status and training readiness.
-- `/settings.html` - Runtime settings and watchlist management.
+- `/settings.html` - Connections, runtime paper controls and ML toggle.
 
 ## API Checks
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/api/health
 Invoke-RestMethod http://127.0.0.1:8000/api/market
-Invoke-RestMethod http://127.0.0.1:8000/api/orderbook/BTCUSDT
+Invoke-RestMethod http://127.0.0.1:8000/api/connections
+Invoke-RestMethod http://127.0.0.1:8000/api/settings
 Invoke-RestMethod http://127.0.0.1:8000/api/alerts/analytics
 Invoke-RestMethod http://127.0.0.1:8000/api/stats/pnl
 Invoke-RestMethod http://127.0.0.1:8000/api/ml/status
 ```
 
-## Alert And PnL Workflow
+## CatBoost And `model missing`
 
-1. Wait for `books_ready` to show `2/2` and for the feed to produce a candidate.
-2. Open a currently active alert with `Open paper`. Expired alerts are deliberately blocked.
-3. The alert detail report stores the feature snapshot, reason, rule score, ML probability, entry, stop and target.
-4. The position closes automatically at stop/target or can be closed manually.
-5. `/alerts.html` records the action event and final result.
-6. `/pnl.html` includes only paper trades opened from issued alerts.
-
-## CatBoost Workflow
-
-Collect at least 50 closed paper trades first:
+`model missing` means `data/models/signal_filter.cbm` has not been created yet. The file appears only after at least 50 closed paper trades, export and training:
 
 ```powershell
 python -m app.ml.export
 python -m app.ml.train
 ```
 
-The training command uses completed trades only, keeps a time-ordered holdout, reports accuracy/AUC and writes `data/models/signal_filter.cbm`. Enable only after reviewing the out-of-sample result:
+The training command uses completed trades, keeps a time-ordered holdout, reports accuracy/AUC and writes the model. Enable it from Settings or with `USE_ML_FILTER=true` after reviewing the out-of-sample result. `ML_THRESHOLD=0.55` is the default gate.
 
-```text
-USE_ML_FILTER=true
-ML_THRESHOLD=0.55
-```
-
-CatBoost is a meta-label filter for rule candidates, not a neural network and not a guarantee of profitable predictions. The model must be retrained when the strategy, symbols, features or risk model changes.
+CatBoost is a meta-label filter, not a price predictor. The rule engine first creates a candidate. When the model is loaded and `ml_probability < ML_THRESHOLD`, the candidate is rejected and no Alert row is created. When the model is missing or disabled, rule-based candidates continue and their ML probability remains empty. Rule score and ML probability are separate values in the alert report.
 
 ## Verification
 
@@ -92,4 +90,4 @@ python -m pytest
 python -m ruff check .
 ```
 
-The repository intentionally ignores `.venv/`, `*.egg-info/`, `data/` and `.env`.
+The repository intentionally ignores `.venv/`, `*.egg-info/`, `data/` and `.env`. Local tests and live exchange WebSocket scenarios must be run on the D: machine; they were not executed in this agent session.
