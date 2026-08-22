@@ -1,1 +1,153 @@
-const $=id=>document.getElementById(id);const esc=v=>String(v??"").replace(/[&<>\"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));function toast(m,k="info"){const n=$("toast");n.textContent=m;n.className=`toast visible ${k}`;clearTimeout(window.t);window.t=setTimeout(()=>n.className="toast",3000)}async function api(p,o={}){const r=await fetch(p,o);const b=await r.json().catch(()=>({}));if(!r.ok)throw Error(b.detail||"Request failed");return b}async function refresh(){try{const [h,w]=await Promise.all([api("/api/health"),api("/api/watchlist")]);$("exchange-badge").textContent=h.exchange.toUpperCase();$("runtime").innerHTML=[["Exchange",h.exchange],["Symbols",h.symbols.join(", ")],["Mode",h.mode],["Live trading",h.live_trading_enabled],["ML filter",h.ml_filter.active?"active":"disabled"],["Books",Object.values(h.books_ready).filter(Boolean).length+"/"+h.symbols.length]].map(x=>`<div class="setting"><span>${x[0]}</span><b>${esc(x[1])}</b></div>`).join("");$("watchlist").innerHTML=w.length?w.map(i=>`<div class="position-row"><div><b>${esc(i.symbol)}</b><span class="market-sub">${esc(i.exchange)} · priority ${i.priority}</span></div><button class="icon-action" onclick="removeItem(${i.id})">Remove</button></div>`).join(""):`<div class="empty">No custom symbols.</div>`}catch(e){toast(e.message,"error")}}async function removeItem(id){try{await api(`/api/watchlist/${id}`,{method:"DELETE"});toast("Symbol removed");refresh()}catch(e){toast(e.message,"error")}}$("watch-form").onsubmit=async e=>{e.preventDefault();try{await api("/api/watchlist",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbol:$("watch-symbol").value,exchange:$("watch-exchange").value})});$("watch-symbol").value="";toast("Symbol saved. Restart the app to subscribe.","success");refresh()}catch(x){toast(x.message,"error")}};refresh();
+const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value ?? "").replace(/[&<>\"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));
+const fmt = (value, digits = 2) => value == null || Number.isNaN(Number(value)) ? "-" : Number(value).toFixed(digits);
+let connections = [];
+let state = {};
+
+async function api(path, options = {}) {
+  const response = await fetch(path, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.detail || "Request failed");
+  return body;
+}
+function toast(message, kind = "info") {
+  const node = $("toast");
+  node.textContent = message;
+  node.className = `toast visible ${kind}`;
+  clearTimeout(window.toastTimer);
+  window.toastTimer = setTimeout(() => { node.className = "toast"; }, 3500);
+}
+function setTab(name) {
+  document.querySelectorAll(".page-tabs button").forEach((button) => {
+    const active = button.dataset.tab === name;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  document.querySelectorAll(".settings-tab").forEach((tab) => tab.classList.toggle("hidden", tab.id !== `tab-${name}`));
+}
+function renderStatus(health, settings, ml) {
+  const sourceCount = Object.keys(health.sources || {}).length;
+  const readyCount = Object.values(health.books_ready || {}).filter(Boolean).length;
+  $("runtime-status").innerHTML = [
+    ["Stream", health.stream_connected ? "Connected" : "Offline", health.stream_connected ? "positive" : "negative"],
+    ["Sources", `${sourceCount} active`, ""],
+    ["Books ready", `${readyCount}/${sourceCount}`, ""],
+    ["Mode", settings.security.trading_mode.toUpperCase(), "positive"],
+    ["Live trading", String(settings.security.live_trading_enabled), "positive"],
+    ["Paper balance", `${fmt(settings.paper.initial_paper_balance)} USDT`, ""],
+  ].map(([label, value, cls]) => `<div class="setting"><span>${label}</span><b class="${cls}">${esc(value)}</b></div>`).join("");
+  $("ml-status").innerHTML = [
+    ["Status", ml.active ? "Active" : "Disabled", ml.active ? "positive" : "negative"],
+    ["Model", ml.model_exists ? "Found" : "Missing", ml.model_exists ? "positive" : "negative"],
+    ["Threshold", fmt(ml.threshold, 2), ""],
+    ["Closed trades", `${ml.closed_trades}/50`, ml.training_ready ? "positive" : ""],
+  ].map(([label, value, cls]) => `<div class="setting"><span>${label}</span><b class="${cls}">${esc(value)}</b></div>`).join("");
+  $("security-boundary").textContent = `TRADING_MODE=${settings.security.trading_mode} · LIVE_TRADING_ENABLED=${settings.security.live_trading_enabled}`;
+  $("settings-status").textContent = `${sourceCount} source${sourceCount === 1 ? "" : "s"} · ${health.stream_connected ? "live" : "offline"}`;
+}
+function renderSources(health) {
+  const sources = Object.values(health.sources || {});
+  $("source-summary").innerHTML = sources.length ? sources.map((source) => {
+    const ready = health.books_ready?.[source.source_key];
+    return `<article class="source-item"><div class="source-item-head"><div><b>${esc(source.label)}</b><span>${esc(source.exchange)} · ${esc(source.market)} · ${esc(source.symbol)}</span></div><i class="source-dot ${ready ? "ready" : "waiting"}" title="${ready ? "Order book ready" : "Waiting for order book"}"></i></div><code>${esc(source.source_key)}</code></article>`;
+  }).join("") : `<div class="empty">No enabled connections. Add one in API / Connections.</div>`;
+}
+function renderConnections() {
+  $("connections").innerHTML = connections.length ? connections.map((item) => `<article class="connection-item"><div class="connection-item-head"><div><b>${esc(item.label)}</b><span>${esc(item.provider)} · ${esc(item.market_type)} · ${item.enabled ? "enabled" : "disabled"}</span></div><span class="connection-state ${item.enabled ? "positive" : "negative"}">${item.enabled ? "ON" : "OFF"}</span></div><div class="connection-symbols">${item.symbols.map((symbol) => `<span>${esc(symbol)}</span>`).join("")}</div><div class="credential-line"><span>API key</span><b>${esc(item.api_key_masked || "not set")}</b><span>Secret</span><b>${esc(item.api_secret_masked || "not set")}</b></div><div class="connection-actions"><button class="button tiny" onclick="editConnection(${item.id})">Edit</button><button class="button tiny ghost" onclick="toggleConnection(${item.id}, ${!item.enabled})">${item.enabled ? "Disable" : "Enable"}</button><button class="button tiny danger" onclick="deleteConnection(${item.id})">Delete</button></div></article>`).join("") : `<div class="empty">No saved connections.</div>`;
+}
+function fillProviders(values) {
+  $("connection-provider").innerHTML = values.map((value) => `<option value="${esc(value)}">${esc(value[0].toUpperCase() + value.slice(1))}</option>`).join("");
+}
+function fillForms(settings) {
+  $("paper-balance").value = settings.paper.initial_paper_balance;
+  $("paper-notional").value = settings.paper.paper_notional_usdt;
+  $("risk-mode").value = settings.paper.risk_mode;
+  $("risk-value").value = settings.paper.risk_value;
+  $("reward-risk").value = settings.paper.reward_risk_ratio;
+  $("signal-ttl").value = settings.paper.signal_ttl_seconds;
+  $("ml-threshold").value = settings.ml.threshold;
+  $("ml-enabled").checked = Boolean(settings.ml.enabled);
+}
+function resetConnectionForm() {
+  $("connection-id").value = "";
+  $("connection-form").reset();
+  $("connection-enabled").checked = true;
+  $("connection-form-title").textContent = "Add connection";
+  $("connection-submit").textContent = "Add connection";
+  $("connection-cancel").classList.add("hidden");
+}
+function editConnection(id) {
+  const item = connections.find((connection) => connection.id === id);
+  if (!item) return;
+  setTab("connections");
+  $("connection-id").value = item.id;
+  $("connection-label").value = item.label;
+  $("connection-provider").value = item.provider;
+  $("connection-market").value = item.market_type;
+  $("connection-symbols").value = item.symbols.join(", ");
+  $("connection-ws").value = "";
+  $("connection-key").value = "";
+  $("connection-secret").value = "";
+  $("connection-enabled").checked = item.enabled;
+  $("connection-form-title").textContent = "Edit connection";
+  $("connection-submit").textContent = "Save connection";
+  $("connection-cancel").classList.remove("hidden");
+}
+async function refresh() {
+  try {
+    const [health, settings, ml, available, saved] = await Promise.all([api("/api/health"), api("/api/settings"), api("/api/ml/status"), api("/api/exchanges"), api("/api/connections")]);
+    state = { health, settings, ml };
+    connections = saved;
+    fillProviders(available.available || []);
+    fillForms(settings);
+    renderStatus(health, settings, ml);
+    renderSources(health);
+    renderConnections();
+  } catch (error) {
+    $("settings-status").textContent = "API unavailable";
+    toast(error.message, "error");
+  }
+}
+async function saveConnection(event) {
+  event.preventDefault();
+  const symbols = $("connection-symbols").value.split(",").map((value) => value.trim().toUpperCase()).filter(Boolean);
+  const payload = { label: $("connection-label").value.trim(), provider: $("connection-provider").value, market_type: $("connection-market").value, symbols, ws_url: $("connection-ws").value.trim() || null, enabled: $("connection-enabled").checked };
+  if ($("connection-key").value) payload.api_key = $("connection-key").value;
+  if ($("connection-secret").value) payload.api_secret = $("connection-secret").value;
+  try {
+    const id = $("connection-id").value;
+    await api(id ? `/api/connections/${id}` : "/api/connections", { method: id ? "PATCH" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    toast(id ? "Connection updated" : "Connection added", "success");
+    resetConnectionForm();
+    await refresh();
+  } catch (error) { toast(error.message, "error"); }
+}
+async function toggleConnection(id, enabled) {
+  try { await api(`/api/connections/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) }); toast(enabled ? "Connection enabled" : "Connection disabled", "success"); await refresh(); } catch (error) { toast(error.message, "error"); }
+}
+async function deleteConnection(id) {
+  if (!window.confirm("Delete this connection and stop its public streams?")) return;
+  try { await api(`/api/connections/${id}`, { method: "DELETE" }); toast("Connection deleted", "success"); await refresh(); } catch (error) { toast(error.message, "error"); }
+}
+async function savePaper(event) {
+  event.preventDefault();
+  try {
+    await api("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initial_paper_balance: Number($("paper-balance").value), paper_notional_usdt: Number($("paper-notional").value), risk_mode: $("risk-mode").value, risk_value: Number($("risk-value").value), reward_risk_ratio: Number($("reward-risk").value), signal_ttl_seconds: Number($("signal-ttl").value) }) });
+    toast("Paper controls saved", "success"); await refresh();
+  } catch (error) { toast(error.message, "error"); }
+}
+async function saveMl(event) {
+  event.preventDefault();
+  try {
+    await api("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ml_threshold: Number($("ml-threshold").value), use_ml_filter: $("ml-enabled").checked }) });
+    toast("ML control saved", "success"); await refresh();
+  } catch (error) { toast(error.message, "error"); }
+}
+document.querySelectorAll(".page-tabs button").forEach((button) => button.addEventListener("click", () => setTab(button.dataset.tab)));
+document.querySelectorAll("[data-tab-link]").forEach((link) => link.addEventListener("click", (event) => { event.preventDefault(); setTab(link.dataset.tabLink); }));
+$("connection-form").addEventListener("submit", saveConnection);
+$("connection-cancel").addEventListener("click", resetConnectionForm);
+$("paper-form").addEventListener("submit", savePaper);
+$("ml-form").addEventListener("submit", saveMl);
+refresh();
+setInterval(refresh, 10000);
