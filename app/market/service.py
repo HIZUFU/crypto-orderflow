@@ -1,4 +1,23 @@
+import asyncio
+import json
+import logging
 from dataclasses import dataclass
+from datetime import timedelta
+from time import monotonic
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from app.config import Settings
+from app.db.models import Alert, AlertOutcome, ExchangeConnection, PaperTrade, utc_now
+from app.exchanges import get_exchange
+from app.market.candles import CandleAggregator
+from app.market.features import FeatureEngine, TradeEvent
+from app.market.orderbook import LocalOrderBook
+from app.ml.filter import SignalFilter
+from app.strategy.orderflow import generate_signal
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -24,21 +43,21 @@ def default_ws_url(provider: str, market_type: str) -> str:
 
 
 class MarketService:
-    def __init__(self, settings, session_factory):
+    def __init__(self, settings: Settings, session_factory: async_sessionmaker) -> None:
         self.settings = settings
         self.session_factory = session_factory
-        self.sources = {}
-        self.books = {}
-        self.engines = {}
-        self.candles = {}
-        self.latest = {}
-        self.last_signal_at = {}
-        self.ml_filter = None
+        self.sources: dict[str, dict] = {}
+        self.books: dict[str, LocalOrderBook] = {}
+        self.engines: dict[str, FeatureEngine] = {}
+        self.candles: dict[str, CandleAggregator] = {}
+        self.latest: dict[str, dict[str, float]] = {}
+        self.last_signal_at: dict[str, float] = {}
+        self.ml_filter: SignalFilter | None = None
         self.refresh_ml_filter()
-        self._tasks = []
-        self._task = None
-        self._monitor_task = None
-        self._outcome_task = None
+        self._tasks: list[asyncio.Task] = []
+        self._task: asyncio.Task | None = None
+        self._monitor_task: asyncio.Task | None = None
+        self._outcome_task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
     @property
@@ -61,10 +80,17 @@ class MarketService:
         async with self.session_factory() as session:
             rows = list((await session.execute(select(ExchangeConnection))).scalars())
         if not rows:
-            ws_url = self.settings.bybit_ws_url if self.settings.default_exchange == "bybit" else self.settings.binance_ws_url
+            ws_url = (
+                self.settings.bybit_ws_url
+                if self.settings.default_exchange == "bybit"
+                else self.settings.binance_ws_url
+            )
             return [ConnectionSpec(
-                None, f"{self.settings.default_exchange.title()} default",
-                self.settings.default_exchange, "linear", ws_url,
+                None,
+                f"{self.settings.default_exchange.title()} default",
+                self.settings.default_exchange,
+                "linear",
+                ws_url,
                 tuple(self.settings.tracked_symbols),
             )]
         specs: list[ConnectionSpec] = []
@@ -146,10 +172,13 @@ class MarketService:
         ws_url = spec.ws_url or default_ws_url(spec.provider, spec.market_type)
         while not self._stop.is_set():
             try:
-                exchange = get_exchange(
-                    spec.provider, ws_url=ws_url, depth=self.settings.orderbook_depth,
-                    market_type=spec.market_type,
-                )
+                kwargs: dict[str, object] = {
+                    "ws_url": ws_url,
+                    "depth": self.settings.orderbook_depth,
+                }
+                if spec.provider == "binance":
+                    kwargs["market_type"] = spec.market_type
+                exchange = get_exchange(spec.provider, **kwargs)
                 async for update in exchange.subscribe(list(spec.symbols)):
                     if self._stop.is_set():
                         return
@@ -159,7 +188,10 @@ class MarketService:
                     if hasattr(update, "bids"):
                         self.books[source_key].apply(
                             "snapshot" if update.is_snapshot else "delta",
-                            update.bids, update.asks, update.update_id, update.timestamp_ms,
+                            update.bids,
+                            update.asks,
+                            update.update_id,
+                            update.timestamp_ms,
                         )
                         features = self.engines[source_key].calculate()
                         if features is not None:
@@ -184,12 +216,15 @@ class MarketService:
                 except asyncio.TimeoutError:
                     pass
 
-    async def _maybe_alert(self, spec, source_key, features):
+    async def _maybe_alert(
+        self, spec: ConnectionSpec, source_key: str, features: dict[str, float]
+    ) -> None:
         now = monotonic()
         if now - self.last_signal_at.get(source_key, 0.0) < self.settings.signal_cooldown_seconds:
             return
         signal = generate_signal(
-            self.sources[source_key]["symbol"], features,
+            self.sources[source_key]["symbol"],
+            features,
             notional=self.settings.paper_notional_usdt,
             leverage=self.settings.paper_leverage,
             risk_value=self.settings.risk_value,
@@ -204,10 +239,7 @@ class MarketService:
             ml_probability = self.ml_filter.predict_proba(features, signal.score)
             ml_passed = ml_probability >= self.settings.ml_threshold
             if not ml_passed:
-                logger.debug(
-                    "CatBoost rejected %s %s at %.3f",
-                    source_key, signal.direction, ml_probability,
-                )
+                logger.debug("CatBoost rejected %s %s at %.3f", source_key, signal.direction, ml_probability)
                 return
         self.last_signal_at[source_key] = now
         created = utc_now()
@@ -227,7 +259,7 @@ class MarketService:
                 stop_loss=signal.stop_loss,
                 take_profit=signal.take_profit,
                 position_notional=self.settings.paper_notional_usdt,
-                leverage=signal.leverage if hasattr(signal, "leverage") else self.settings.paper_leverage,
+                leverage=self.settings.paper_leverage,
                 risk_amount=signal.risk_amount,
                 score=signal.score,
                 reason=signal.reason,
@@ -293,9 +325,12 @@ class MarketService:
                     if alert:
                         alert.outcome_type = reason
                         session.add(AlertOutcome(
-                            alert_id=alert.id, paper_trade_id=trade.id,
-                            outcome_type=reason, outcome_timestamp=trade.closed_at,
-                            price_at_outcome=current, ml_probability=alert.ml_probability,
+                            alert_id=alert.id,
+                            paper_trade_id=trade.id,
+                            outcome_type=reason,
+                            outcome_timestamp=trade.closed_at,
+                            price_at_outcome=current,
+                            ml_probability=alert.ml_probability,
                             ml_passed_filter=alert.ml_passed_filter,
                         ))
             await session.commit()
@@ -335,9 +370,14 @@ class MarketService:
                     reached_target = current >= alert.take_profit if alert.direction == "LONG" else current <= alert.take_profit
                     hit_stop = current <= alert.stop_loss if alert.direction == "LONG" else current >= alert.stop_loss
                 session.add(AlertOutcome(
-                    alert_id=alert.id, outcome_type="expired", outcome_timestamp=now,
-                    price_at_outcome=current, hypothetical_pnl=hypothetical,
-                    reached_target=reached_target, hit_stop=hit_stop,
-                    ml_probability=alert.ml_probability, ml_passed_filter=alert.ml_passed_filter,
+                    alert_id=alert.id,
+                    outcome_type="expired",
+                    outcome_timestamp=now,
+                    price_at_outcome=current,
+                    hypothetical_pnl=hypothetical,
+                    reached_target=reached_target,
+                    hit_stop=hit_stop,
+                    ml_probability=alert.ml_probability,
+                    ml_passed_filter=alert.ml_passed_filter,
                 ))
             await session.commit()
