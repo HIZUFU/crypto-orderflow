@@ -12,14 +12,27 @@ logger = logging.getLogger(__name__)
 
 
 class BinanceExchange(Exchange):
-    def __init__(self, ws_url: str = "wss://fstream.binance.com/stream", depth: int = 20) -> None:
+    def __init__(
+        self,
+        ws_url: str = "wss://fstream.binance.com/stream",
+        depth: int = 20,
+        market_type: str = "linear",
+    ) -> None:
         super().__init__("binance", ws_url)
         self.depth = depth
+        self.market_type = market_type
 
     def _rest_url(self, symbol: str) -> str:
-        if "fstream" in self.ws_url:
+        if self.market_type == "linear":
             return f"https://fapi.binance.com/fapi/v1/depth?symbol={symbol.upper()}&limit=1000"
         return f"https://api.binance.com/api/v3/depth?symbol={symbol.upper()}&limit=1000"
+
+    def _stream_url(self, streams: list[str]) -> str:
+        base = self.ws_url.rstrip("/")
+        if base.endswith("/ws"):
+            base = f"{base[:-3]}/stream"
+        separator = "&" if "?" in base else "?"
+        return f"{base}{separator}streams={'/'.join(streams)}"
 
     async def _snapshot(self, symbol: str) -> OrderBookUpdate:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -36,8 +49,9 @@ class BinanceExchange(Exchange):
         for symbol in symbols:
             normalized = self.normalize_symbol(symbol)
             streams.extend((f"{normalized}@depth{self.depth}@100ms", f"{normalized}@aggTrade"))
-        stream_url = f"{self.ws_url}?streams={'/'.join(streams)}"
-        async with websockets.connect(stream_url, ping_interval=20, ping_timeout=20) as socket:
+        async with websockets.connect(
+            self._stream_url(streams), ping_interval=20, ping_timeout=20
+        ) as socket:
             # Connect before snapshots so buffered events can be checked against REST ids.
             snapshots = await asyncio.gather(*(self._snapshot(symbol) for symbol in symbols))
             last_update = {snapshot.symbol: snapshot.update_id for snapshot in snapshots}

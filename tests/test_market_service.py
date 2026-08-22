@@ -9,6 +9,11 @@ def test_default_stream_urls_cover_spot_and_linear() -> None:
     assert "fstream.binance.com" in default_ws_url("binance", "linear")
 
 
+def test_configured_binance_endpoint_is_combined_stream_compatible() -> None:
+    settings = Settings(binance_ws_url="wss://fstream.binance.com/ws")
+    assert settings.binance_ws_url.endswith("/ws")
+
+
 def test_sources_are_isolated_by_connection_and_symbol() -> None:
     service = MarketService(Settings(use_ml_filter=False), None)
     service._prepare_sources([
