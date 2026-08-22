@@ -25,6 +25,12 @@ def _aware(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
+def _as_bool(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _features(alert: Alert) -> dict:
     try:
         return json.loads(alert.features_json or "{}")
@@ -138,11 +144,16 @@ def connection_json(connection: ExchangeConnection) -> dict:
 def _connection_payload(payload: dict) -> tuple[str, str, list[str]]:
     provider = str(payload.get("provider", "")).lower()
     market_type = str(payload.get("market_type", "linear")).lower()
-    symbols = sorted({str(value).strip().upper() for value in payload.get("symbols", []) if str(value).strip()})
+    if market_type == "futures":
+        market_type = "linear"
+    raw_symbols = payload.get("symbols", [])
+    if isinstance(raw_symbols, str):
+        raw_symbols = raw_symbols.split(",")
+    symbols = sorted({str(value).strip().upper() for value in raw_symbols if str(value).strip()})
     if provider not in EXCHANGES:
         raise HTTPException(status_code=422, detail=f"provider must be one of: {', '.join(EXCHANGES)}")
     if market_type not in {"spot", "linear"}:
-        raise HTTPException(status_code=422, detail="market_type must be spot or linear")
+        raise HTTPException(status_code=422, detail="market_type must be spot or futures")
     if not symbols:
         raise HTTPException(status_code=422, detail="at least one symbol is required")
     return provider, market_type, symbols
@@ -195,13 +206,18 @@ async def update_settings(payload: dict, request: Request) -> dict:
         "reward_risk_ratio": "reward/risk ratio",
         "signal_ttl_seconds": "signal lifetime",
     }
-    for key, label in positive.items():
-        if key in values and float(values[key]) <= 0:
-            raise HTTPException(status_code=422, detail=f"{label} must be positive")
-    if "risk_mode" in values and values["risk_mode"] not in {"percent_notional", "fixed_usdt"}:
-        raise HTTPException(status_code=422, detail="risk_mode must be percent_notional or fixed_usdt")
-    if "ml_threshold" in values and not 0 <= float(values["ml_threshold"]) <= 1:
-        raise HTTPException(status_code=422, detail="ml threshold must be between 0 and 1")
+    try:
+        for key, label in positive.items():
+            if key in values and float(values[key]) <= 0:
+                raise HTTPException(status_code=422, detail=f"{label} must be positive")
+        if "risk_mode" in values and values["risk_mode"] not in {"percent_notional", "fixed_usdt"}:
+            raise HTTPException(status_code=422, detail="risk_mode must be percent_notional or fixed_usdt")
+        if "ml_threshold" in values and not 0 <= float(values["ml_threshold"]) <= 1:
+            raise HTTPException(status_code=422, detail="ml threshold must be between 0 and 1")
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=422, detail="numeric settings must be valid numbers") from error
+    if "use_ml_filter" in values:
+        values["use_ml_filter"] = _as_bool(values["use_ml_filter"])
     await save_runtime_settings(values, settings)
     if "use_ml_filter" in values:
         request.app.state.market_service.refresh_ml_filter()
@@ -224,7 +240,7 @@ async def add_connection(payload: dict, request: Request, session: AsyncSession 
     item = ExchangeConnection(
         label=str(payload.get("label") or f"{provider} {market_type}")[:64], provider=provider,
         market_type=market_type, ws_url=payload.get("ws_url") or None,
-        symbols_json=json.dumps(symbols), enabled=bool(payload.get("enabled", True)),
+        symbols_json=json.dumps(symbols), enabled=_as_bool(payload.get("enabled", True)),
         api_key_ciphertext=encrypt_secret(payload.get("api_key")),
         api_secret_ciphertext=encrypt_secret(payload.get("api_secret")),
     )
@@ -260,7 +276,7 @@ async def update_connection(
     if "ws_url" in payload:
         item.ws_url = payload["ws_url"] or None
     if "enabled" in payload:
-        item.enabled = bool(payload["enabled"])
+        item.enabled = _as_bool(payload["enabled"])
     if payload.get("api_key"):
         item.api_key_ciphertext = encrypt_secret(payload["api_key"])
     if payload.get("api_secret"):
@@ -541,6 +557,8 @@ async def remove_watchlist(item_id: int, session: AsyncSession = Depends(get_ses
 async def ml_status(request: Request, session: AsyncSession = Depends(get_session)) -> dict:
     service = request.app.state.market_service
     model_path = Path(settings.ml_model_path)
+    if settings.use_ml_filter and model_path.exists() and not (service.ml_filter and service.ml_filter.model):
+        service.refresh_ml_filter()
     closed = list((await session.execute(select(PaperTrade).where(PaperTrade.status == "closed"))).scalars())
     outcomes = list((await session.execute(select(AlertOutcome))).scalars())
     return {

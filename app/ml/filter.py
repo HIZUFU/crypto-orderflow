@@ -1,8 +1,14 @@
 """Apply a trained CatBoost model to filter candidate signals."""
+from __future__ import annotations
+
 from pathlib import Path
 
 import numpy as np
-from catboost import CatBoostClassifier
+
+try:
+    from catboost import CatBoostClassifier
+except ImportError:  # ML is optional when the application runs in rule-only mode.
+    CatBoostClassifier = None  # type: ignore[assignment,misc]
 
 
 FEATURE_COLUMNS = [
@@ -20,6 +26,8 @@ class SignalFilter:
             self.load()
 
     def load(self) -> None:
+        if CatBoostClassifier is None:
+            raise RuntimeError("CatBoost is not installed; install the ML dependencies to load a model")
         self.model = CatBoostClassifier()
         self.model.load_model(str(self.model_path))
 
