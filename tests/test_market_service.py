@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from app.config import Settings
 from app.market.service import ConnectionSpec, MarketService, default_ws_url
 
@@ -19,3 +21,13 @@ def test_sources_are_isolated_by_connection_and_symbol() -> None:
     assert service.resolve_source("BTCUSDT", "1:BTCUSDT") == "1:BTCUSDT"
     assert service.resolve_source("BTCUSDT", "2:BTCUSDT") == "2:BTCUSDT"
     assert service.resolve_source("BTCUSDT", "missing") is None
+
+
+def test_source_keys_are_stable_for_same_connection() -> None:
+    service = MarketService(Settings(use_ml_filter=False), None)
+    specs = [ConnectionSpec(7, "Desk", "bybit", "linear", None, ("BTCUSDT", "ETHUSDT"))]
+    service._prepare_sources(specs)
+    first = set(service.sources)
+    service._prepare_sources(specs)
+    assert set(service.sources) == first
+    assert service.resolve_source("BTCUSDT", "7:BTCUSDT") == "7:BTCUSDT"

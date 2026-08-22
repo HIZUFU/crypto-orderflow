@@ -1,4 +1,5 @@
 """Binance spot and USD-M futures public market adapter."""
+import asyncio
 import json
 import logging
 
@@ -25,26 +26,65 @@ class BinanceExchange(Exchange):
             response = await client.get(self._rest_url(symbol))
             response.raise_for_status()
             data = response.json()
-        return OrderBookUpdate(symbol=symbol.upper(), bids=data.get("bids", []), asks=data.get("asks", []), update_id=int(data.get("lastUpdateId", 0)), timestamp_ms=0, is_snapshot=True)
+        return OrderBookUpdate(
+            symbol=symbol.upper(), bids=data.get("bids", []), asks=data.get("asks", []),
+            update_id=int(data.get("lastUpdateId", 0)), timestamp_ms=0, is_snapshot=True,
+        )
 
     async def subscribe(self, symbols: list[str]):
-        for symbol in symbols:
-            yield await self._snapshot(symbol)
         streams = []
-        for symbol in symbols:
-            normalized = self.normalize_symbol(symbol)
+        normalized_symbols = [self.normalize_symbol(symbol) for symbol in symbols]
+        for normalized in normalized_symbols:
             streams.extend((f"{normalized}@depth{self.depth}@100ms", f"{normalized}@aggTrade"))
         stream_url = f"{self.ws_url}?streams={'/'.join(streams)}"
         async with websockets.connect(stream_url, ping_interval=20, ping_timeout=20) as socket:
+            # The socket is connected before snapshots are requested, so buffered depth
+            # events can be validated against each REST lastUpdateId.
+            snapshots = await asyncio.gather(*(self._snapshot(symbol) for symbol in symbols))
+            last_update = {snapshot.symbol: snapshot.update_id for snapshot in snapshots}
+            synced = {snapshot.symbol: False for snapshot in snapshots}
+            yield from snapshots
             logger.info("Binance subscribed to %s symbols", len(symbols))
             async for raw_message in socket:
                 message = json.loads(raw_message)
                 data = message.get("data", {})
                 stream = message.get("stream", "")
-                if "@depth" in stream and data.get("s"):
-                    yield OrderBookUpdate(symbol=data["s"], bids=data.get("b", []), asks=data.get("a", []), update_id=int(data.get("u", 0)), timestamp_ms=int(data.get("E", 0)), is_snapshot=False)
-                elif "@aggTrade" in stream and data.get("s"):
-                    yield TradeUpdate(symbol=data["s"], price=float(data["p"]), quantity=float(data["q"]), side="Sell" if data.get("m") else "Buy", timestamp_ms=int(data["T"]), trade_id=str(data.get("a", "")))
+                symbol = data.get("s")
+                if "@depth" in stream and symbol:
+                    upper_symbol = symbol.upper()
+                    first_update = int(data.get("U", 0))
+                    final_update = int(data.get("u", 0))
+                    previous_update = int(data.get("pu", 0))
+                    snapshot_id = last_update[upper_symbol]
+                    if final_update <= snapshot_id:
+                        continue
+                    if not synced[upper_symbol]:
+                        if first_update > snapshot_id + 1:
+                            snapshot = await self._snapshot(upper_symbol)
+                            last_update[upper_symbol] = snapshot.update_id
+                            synced[upper_symbol] = False
+                            yield snapshot
+                            continue
+                        if not (first_update <= snapshot_id + 1 <= final_update):
+                            continue
+                        synced[upper_symbol] = True
+                    elif previous_update and previous_update != last_update[upper_symbol]:
+                        snapshot = await self._snapshot(upper_symbol)
+                        last_update[upper_symbol] = snapshot.update_id
+                        synced[upper_symbol] = False
+                        yield snapshot
+                        continue
+                    last_update[upper_symbol] = final_update
+                    yield OrderBookUpdate(
+                        symbol=upper_symbol, bids=data.get("b", []), asks=data.get("a", []),
+                        update_id=final_update, timestamp_ms=int(data.get("E", 0)), is_snapshot=False,
+                    )
+                elif "@aggTrade" in stream and symbol:
+                    yield TradeUpdate(
+                        symbol=symbol.upper(), price=float(data["p"]), quantity=float(data["q"]),
+                        side="Sell" if data.get("m") else "Buy", timestamp_ms=int(data["T"]),
+                        trade_id=str(data.get("a", "")),
+                    )
 
     def normalize_symbol(self, symbol: str) -> str:
         return symbol.replace("/", "").lower()
