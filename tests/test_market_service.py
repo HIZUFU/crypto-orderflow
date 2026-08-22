@@ -10,9 +10,9 @@ def test_default_stream_urls_cover_spot_and_linear() -> None:
     assert "fstream.binance.com" in default_ws_url("binance", "linear")
 
 
-def test_binance_legacy_ws_endpoint_normalizes_to_combined_stream() -> None:
+def test_binance_legacy_ws_endpoint_normalizes_to_combined_diff_stream() -> None:
     exchange = BinanceExchange(ws_url="wss://fstream.binance.com/ws")
-    assert exchange._stream_url(["btcusdt@aggTrade"]) == "wss://fstream.binance.com/stream?streams=btcusdt@aggTrade"
+    assert exchange._stream_url(["btcusdt@depth@100ms"]) == "wss://fstream.binance.com/stream?streams=btcusdt@depth@100ms"
 
 
 def test_sources_are_isolated_by_connection_and_symbol() -> None:

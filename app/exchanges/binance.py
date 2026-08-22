@@ -48,7 +48,9 @@ class BinanceExchange(Exchange):
         streams = []
         for symbol in symbols:
             normalized = self.normalize_symbol(symbol)
-            streams.extend((f"{normalized}@depth{self.depth}@100ms", f"{normalized}@aggTrade"))
+            # A diff depth stream is required to reconcile a REST snapshot. The partial
+            # depth streams only allow 5, 10 or 20 levels and cannot support depth=50.
+            streams.extend((f"{normalized}@depth@100ms", f"{normalized}@aggTrade"))
         async with websockets.connect(
             self._stream_url(streams), ping_interval=20, ping_timeout=20
         ) as socket:
