@@ -1,17 +1,36 @@
-.env
-.env.*
-!.env.example
+```
+# Python
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Tests
 .pytest_cache/
-.ruff_cache/
-.mypy_cache/
-*.py[cod]
-*.sqlite3
-*.db
-data/
-logs/
-models/
+
+# Logs
 *.log
-.DS_Store
-.vscode/
-.idea/
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Dependencies
+.venv/
+venv/
+pip-log.txt
+pip-selfcheck.json
+
+# Coverage
+.coverage
+htmlcov/
+coverage.xml
+
+# Build artifacts
+build/
+dist/
+*.egg
+*.wheel
+```

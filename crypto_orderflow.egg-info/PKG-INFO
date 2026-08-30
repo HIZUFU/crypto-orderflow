@@ -1,0 +1,23 @@
+Metadata-Version: 2.1
+Name: crypto-orderflow
+Version: 0.1.0
+Summary: Paper-only crypto order-flow analytics and alerting platform
+Requires-Python: <3.13,>=3.12
+Requires-Dist: aiosqlite==0.20.0
+Requires-Dist: fastapi==0.115.6
+Requires-Dist: numpy==2.2.1
+Requires-Dist: pydantic-settings==2.7.1
+Requires-Dist: sqlalchemy==2.0.36
+Requires-Dist: uvicorn[standard]==0.34.0
+Requires-Dist: websockets==14.1
+Provides-Extra: dev
+Requires-Dist: httpx==0.28.1; extra == "dev"
+Requires-Dist: pytest==8.3.4; extra == "dev"
+Requires-Dist: pytest-asyncio==0.25.0; extra == "dev"
+Requires-Dist: ruff==0.9.2; extra == "dev"
+Provides-Extra: postgres
+Requires-Dist: asyncpg==0.30.0; extra == "postgres"
+Provides-Extra: ml
+Requires-Dist: catboost==1.2.7; extra == "ml"
+Requires-Dist: pandas==2.2.3; extra == "ml"
+Requires-Dist: pyarrow==18.1.0; extra == "ml"
